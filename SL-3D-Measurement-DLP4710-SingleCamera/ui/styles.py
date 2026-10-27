@@ -112,7 +112,7 @@ QPushButton#saveBtn:hover {
     background-color: #157347;
 }
 
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+QLineEdit, QComboBox {
     background-color: #22222c;
     border: 1px solid #39394a;
     border-radius: 4px;
@@ -122,8 +122,101 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     min-height: 18px;
 }
 
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+QLineEdit:focus, QComboBox:focus {
     border: 1px solid #58a6ff;
+}
+
+QLineEdit:disabled, QComboBox:disabled {
+    background-color: #1a1a20;
+    color: #555566;
+}
+
+QSpinBox, QDoubleSpinBox {
+    background-color: #22222c;
+    border: 1px solid #39394a;
+    border-radius: 4px;
+    padding: 3px 22px 3px 6px;
+    color: #ffffff;
+    selection-background-color: #0d6efd;
+    min-height: 18px;
+}
+
+QSpinBox:focus, QDoubleSpinBox:focus {
+    border: 1px solid #58a6ff;
+}
+
+QSpinBox:disabled, QDoubleSpinBox:disabled {
+    background-color: #1a1a20;
+    color: #555566;
+}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    border-left: 1px solid #39394a;
+    border-bottom: 1px solid #39394a;
+    background-color: #292936;
+    border-top-right-radius: 3px;
+}
+
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {
+    background-color: #38384a;
+}
+
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed {
+    background-color: #1a56a6;
+}
+
+QSpinBox::up-button:disabled, QDoubleSpinBox::up-button:disabled {
+    background-color: #202028;
+    border-color: #2c2c38;
+}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    width: 0px;
+    height: 0px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid #b0b0cc;
+}
+
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled {
+    border-bottom-color: #555566;
+}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    border-left: 1px solid #39394a;
+    background-color: #292936;
+    border-bottom-right-radius: 3px;
+}
+
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: #38384a;
+}
+
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {
+    background-color: #1a56a6;
+}
+
+QSpinBox::down-button:disabled, QDoubleSpinBox::down-button:disabled {
+    background-color: #202028;
+    border-color: #2c2c38;
+}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    width: 0px;
+    height: 0px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #b0b0cc;
+}
+
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
+    border-top-color: #555566;
 }
 
 QTextEdit {

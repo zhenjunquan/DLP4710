@@ -46,7 +46,7 @@ from ..core.workers import (
     DetectCornersWorker,
 )
 from .styles import MODERN_STYLE
-from .widgets import ImageDisplayWidget, PoseTableWidget
+from .widgets import ImageDisplayWidget, MultiFolderDialog, PoseTableWidget
 
 
 class CalibrationMainWindow(QMainWindow):
@@ -168,6 +168,7 @@ class CalibrationMainWindow(QMainWindow):
         self.btn_capture_pose.setObjectName("primaryBtn")
         self.btn_new_session = QPushButton("新建标定保存会话")
         self.btn_import_pose = QPushButton("导入离线姿态")
+        self.btn_import_pose.setToolTip("批量导入离线姿态文件夹 (按住 Ctrl/Shift 可多选，也可直接选择包含姿态的父目录)")
         self.btn_delete_pose = QPushButton("删除选中姿态")
 
         lay_poses.addWidget(self.btn_new_session, 0, 0, 1, 2)
@@ -647,18 +648,56 @@ class CalibrationMainWindow(QMainWindow):
             QMessageBox.critical(self, "生成失败", f"错误: {e}")
 
     def _on_import_pose(self):
-        folder = QFileDialog.getExistingDirectory(self, "选择姿态图像目录 (包含0.bmp和条纹图像)")
-        if not folder:
+        dialog = MultiFolderDialog(
+            self,
+            caption="选择姿态文件夹 (按住 Ctrl/Shift 可多选，也可直接选择包含多个姿态的根目录)",
+            directory="",
+        )
+        if not dialog.exec():
             return
 
-        ok, pose, msg = self.controller.add_pose_from_folder(folder)
-        if ok and pose is not None:
-            self.log(msg)
+        chosen_paths = dialog._chosen_dirs or dialog.selectedFolders()
+        if not chosen_paths:
+            return
+
+        pose_folders = self.controller.find_pose_folders(chosen_paths)
+        if not pose_folders:
+            QMessageBox.warning(
+                self,
+                "未找到有效姿态",
+                f"在所选路径中未找到包含棋盘格基底图像 (0.bmp 或 board.bmp) 的姿态文件夹。\n所选路径:\n"
+                + "\n".join(chosen_paths[:3]),
+            )
+            return
+
+        old_count = len(self.controller.poses)
+        imported_count, poses, messages = self.controller.add_poses_from_folders(pose_folders)
+
+        if imported_count > 0:
+            for msg in messages:
+                self.log(msg)
             self._refresh_pose_table()
-            self.table_poses.selectRow(len(self.controller.poses) - 1)
+            self.table_poses.selectRow(old_count)
             self._on_pose_selection_changed()
+
+            names = [p.name for p in poses]
+            if imported_count == 1:
+                self.log(f"成功导入姿态: {names[0]}")
+            else:
+                summary = f"成功批量导入 {imported_count} 个离线姿态: {', '.join(names[:6])}"
+                if imported_count > 6:
+                    summary += f" 等共 {imported_count} 个"
+                self.log(summary)
+                QMessageBox.information(
+                    self,
+                    "批量导入完成",
+                    f"已成功批量导入 {imported_count} 个姿态文件夹！\n\n"
+                    f"列表当前总姿态数: {len(self.controller.poses)}\n"
+                    f"可在姿态列表中查看，并执行【批量检测角点】与【批量解算相位】。",
+                )
         else:
-            QMessageBox.warning(self, "导入失败", msg)
+            msg_str = "\n".join(messages[:5])
+            QMessageBox.warning(self, "导入完成 (无新增)", f"未新增姿态，可能所选姿态已全部导入过:\n{msg_str}")
 
     def _on_delete_pose(self):
         row = self.table_poses.currentRow()

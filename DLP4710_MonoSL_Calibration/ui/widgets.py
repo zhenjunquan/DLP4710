@@ -2,6 +2,7 @@
 Reusable UI widgets for image preview with corner overlay and pose management table.
 """
 
+import os
 from typing import List, Optional
 import cv2
 import numpy as np
@@ -9,11 +10,14 @@ from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QFileDialog,
     QHeaderView,
     QLabel,
+    QListView,
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -267,3 +271,55 @@ class PoseTableWidget(QTableWidget):
         item_proj = QTableWidgetItem(proj_text)
         item_proj.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setItem(row, self.COL_PROJ_RMS, item_proj)
+
+
+class MultiFolderDialog(QFileDialog):
+    """
+    Folder selection dialog that supports selecting multiple directories via Ctrl/Shift,
+    or selecting a parent directory containing multiple pose folders.
+    """
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        caption: str = "选择姿态文件夹 (按住 Ctrl/Shift 可多选，也可直接选择包含姿态的根目录)",
+        directory: str = "",
+    ):
+        super().__init__(parent, caption, directory)
+        self.setFileMode(QFileDialog.FileMode.Directory)
+        self.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        self._tree = self.findChild(QTreeView)
+        self._list = self.findChild(QListView, "listView")
+        for view in (self._tree, self._list):
+            if view:
+                view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._chosen_dirs: List[str] = []
+
+    def accept(self):
+        self._chosen_dirs = self.selectedFolders()
+        self.done(1)
+
+    def selectedFolders(self) -> List[str]:
+        res: List[str] = []
+        for view in (self._tree, self._list):
+            if view:
+                model = view.model()
+                sel = view.selectionModel()
+                if model and sel:
+                    for idx in sel.selectedRows():
+                        path = model.filePath(idx)
+                        if os.path.isdir(path):
+                            res.append(os.path.normpath(path))
+        if res:
+            return sorted(list(set(res)))
+
+        files = self.selectedFiles()
+        dirs = [os.path.normpath(f) for f in files if os.path.isdir(f)]
+        if dirs:
+            return dirs
+
+        cur = self.directory().absolutePath()
+        if os.path.isdir(cur):
+            return [os.path.normpath(cur)]
+        return []
+

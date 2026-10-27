@@ -3,9 +3,10 @@ Controller orchestrating business logic and state for calibration software.
 """
 
 import os
+import re
 import shutil
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 import cv2
 import numpy as np
 
@@ -76,21 +77,111 @@ class CalibrationController:
         self.joint_engine.square_size_mm = square_size_mm
         self.calibration_result = None
 
+    @staticmethod
+    def is_pose_folder(folder_path: str) -> bool:
+        """Checks if a directory contains a valid chessboard base image."""
+        if not folder_path or not os.path.isdir(folder_path):
+            return False
+        candidates = {"0.bmp", "board.bmp", "chess.bmp", "chessboard.bmp"}
+        try:
+            with os.scandir(folder_path) as entries:
+                for entry in entries:
+                    if entry.is_file() and entry.name.lower() in candidates:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _natural_sort_key(s: str) -> List[Union[int, str]]:
+        return [
+            int(text) if text.isdigit() else text.lower()
+            for text in re.split(r"(\d+)", str(s))
+        ]
+
+    @classmethod
+    def find_pose_folders(cls, paths: Union[str, Sequence[str]]) -> List[str]:
+        """
+        Discovers all valid pose folders from the provided path(s).
+        Supports:
+          - A list of pose folders
+          - A parent directory containing subdirectories for each pose
+          - A root directory containing a 'poses' directory
+        Returns a naturally sorted list of unique absolute pose folder paths.
+        """
+        if isinstance(paths, str):
+            paths = [paths]
+
+        found: List[str] = []
+        for p in paths:
+            if not p or not os.path.exists(p):
+                continue
+            abs_p = os.path.abspath(p)
+            if not os.path.isdir(abs_p):
+                continue
+
+            # 1. Check direct child directories first
+            direct_children: List[str] = []
+            try:
+                with os.scandir(abs_p) as entries:
+                    for entry in entries:
+                        if entry.is_dir() and cls.is_pose_folder(entry.path):
+                            direct_children.append(entry.path)
+            except Exception:
+                pass
+
+            if direct_children:
+                direct_children.sort(key=cls._natural_sort_key)
+                found.extend(direct_children)
+            elif cls.is_pose_folder(abs_p):
+                found.append(abs_p)
+            else:
+                # 2. Check if there is an inner 'poses' folder (session structure)
+                poses_sub = os.path.join(abs_p, "poses")
+                if os.path.isdir(poses_sub):
+                    sub_children: List[str] = []
+                    try:
+                        with os.scandir(poses_sub) as entries:
+                            for entry in entries:
+                                if entry.is_dir() and cls.is_pose_folder(entry.path):
+                                    sub_children.append(entry.path)
+                    except Exception:
+                        pass
+                    if sub_children:
+                        sub_children.sort(key=cls._natural_sort_key)
+                        found.extend(sub_children)
+
+        # Deduplicate while preserving order
+        seen = set()
+        result: List[str] = []
+        for f in found:
+            norm = os.path.normcase(os.path.abspath(f))
+            if norm not in seen:
+                seen.add(norm)
+                result.append(f)
+        return result
+
     def add_pose_from_folder(self, folder_path: str) -> Tuple[bool, Optional[CalibrationPose], str]:
         """
         Loads a pose directory containing:
           - 0.bmp / board.bmp (chessboard image without fringe)
           - 12 horizontal fringe images (H_Fringe_1..12 or 1..12)
           - 12 vertical fringe images (V_Fringe_1..12 or 13..24)
+        Automatically reloads pre-decoded camera_corners.npy and projector_corners.npy if present.
         """
         if not os.path.isdir(folder_path):
             return False, None, f"目录不存在: {folder_path}"
 
+        norm_path = os.path.normcase(os.path.abspath(folder_path))
         pose_name = os.path.basename(os.path.normpath(folder_path))
-        pose = CalibrationPose(name=pose_name, folder_path=folder_path)
+
+        # Check for duplicates
+        for existing in self.poses:
+            if existing.folder_path and os.path.normcase(os.path.abspath(existing.folder_path)) == norm_path:
+                return False, existing, f"姿态已存在，跳过重复导入: {pose_name}"
 
         # Check for board image
-        candidates_board = ["0.bmp", "board.bmp", "chess.bmp"]
+        candidates_board = ["0.bmp", "board.bmp", "chess.bmp", "chessboard.bmp"]
         board_img = None
         for b in candidates_board:
             bp = os.path.join(folder_path, b)
@@ -102,12 +193,56 @@ class CalibrationController:
         if board_img is None:
             return False, None, f"未在目录中找到棋盘格基底图像 (0.bmp 或 board.bmp): {folder_path}"
 
+        pose = CalibrationPose(name=pose_name, folder_path=folder_path)
         pose.board_image = board_img
         pose.camera_image_size = (board_img.shape[1], board_img.shape[0])
+
+        # Automatically load pre-extracted corners if available
+        cam_corners_path = os.path.join(folder_path, "camera_corners.npy")
+        if os.path.isfile(cam_corners_path):
+            try:
+                corners = np.load(cam_corners_path)
+                if corners is not None and len(corners) > 0:
+                    pose.camera_corners = corners.astype(np.float32)
+                    pose.corner_valid = True
+            except Exception:
+                pass
+
+        proj_corners_path = os.path.join(folder_path, "projector_corners.npy")
+        if os.path.isfile(proj_corners_path):
+            try:
+                proj_corners = np.load(proj_corners_path)
+                if proj_corners is not None and len(proj_corners) > 0:
+                    pose.projector_corners = proj_corners.astype(np.float32)
+                    pose.phase_valid = True
+            except Exception:
+                pass
 
         self.poses.append(pose)
         self.calibration_result = None
         return True, pose, f"成功导入姿态: {pose_name}"
+
+    def add_poses_from_folders(
+        self, folder_paths: Sequence[str]
+    ) -> Tuple[int, List[CalibrationPose], List[str]]:
+        """
+        Batch imports multiple pose folders or directory trees.
+        Returns:
+            (imported_count, list_of_imported_poses, messages)
+        """
+        resolved_folders = self.find_pose_folders(folder_paths)
+        imported_poses: List[CalibrationPose] = []
+        messages: List[str] = []
+
+        for folder in resolved_folders:
+            ok, pose, msg = self.add_pose_from_folder(folder)
+            if ok and pose is not None:
+                imported_poses.append(pose)
+                messages.append(msg)
+            else:
+                messages.append(msg)
+
+        return len(imported_poses), imported_poses, messages
 
     def delete_pose(self, index: int) -> bool:
         if 0 <= index < len(self.poses):
