@@ -1,0 +1,191 @@
+# DLP4710 单目结构光三维标定与测量系统 (Python 工业工程版)
+
+本项目是基于德州仪器 **TI DLP4710** 投影光机与**大恒高分辨率远心工业相机**构建的高精度单目结构光三维测量与标定工程。
+全面重构并升级了原 C++ 标定工程（`DLP4710_MonoSL_Calibration`）与三维测量工程（`SL-3D-Measurement-DLP4710-SingleCamera`），采用现代化 Python 工程化架构，兼具工业现场高稳定性、极佳的代码可读性与算法扩展性。
+
+---
+
+## 🌟 核心特性与工程亮点
+
+1. **严格工程化分层架构（Decoupled & Modular Design）**
+   - 彻底告别单文件脚本设计，将核心算法库（`dlp_common`）、标定工程（`DLP4710_MonoSL_Calibration`）、测量工程（`SL-3D-Measurement-DLP4710-SingleCamera`）正交解耦。
+   - 算法层、硬件抽象层、数据模型层、多线程工作层（QThread Workers）、界面表现层严格隔离。
+
+2. **高精度远心相机 + Scheimpflug DLP 联合标定（Joint Optimization）**
+   - **远心相机模型**：采用 2×4 仿射投影矩阵 $A_{2\times 4}$，结合归一化像平面的 5 参数非线性畸变 $(k_1, k_2, p_1, p_2, k_3)$。
+   - **Scheimpflug 投影仪模型**：支持有理多项式径向畸变、切向畸变、薄棱镜畸变及沙姆倾斜角 $(\tau_x, \tau_y)$ 的 14 参数投影模型。
+   - **Huber 鲁棒损失联合优化**：利用 Levenberg-Marquardt 算法同时优化投影仪内参、相机仿射参数、镜头畸变与全部棋盘格空间位姿，输出亚像素级重投影精度。
+   - **完全兼容 C++ 标定文件**：通过 `cv2.FileStorage` 实现与 OpenCV YML 格式的双向完全兼容读取与导出。
+
+3. **三频四步外差绝对相位解算与高精度光线相交重构**
+   - 支持三频外差（默认周期：`[70, 64, 59]`）与四步相移算法，自动滤除高频噪声并输出绝对相位。
+   - 三维空间光线相交：基于远心平行射线模型与 DLP 虚拟行光平面，采用**带边界保护的 Newton-二分混合迭代求解器**，快速收敛出空间三维坐标 $(X, Y, Z)$。
+
+4. **双模硬件支持（Real Hardware + Seamless Simulation）**
+   - **真实硬件模式**：通过 Python `ctypes` 零拷贝调用 64 位 `DLP4710Control.dll` 与 `cyusbserial.dll`，支持 Flash 烧录、TriggerOut2 硬件同步触发信号与高速序列投影；
+   - **仿真/离线模式**：在无真实物理设备的环境下自动或手动回退至 Mock 模拟模式，支持离线 12 帧/24 帧目录图像回放与自动化单元测试。
+
+5. **现代化 PyQt6 工业级交互界面与 3D 点云视窗**
+   - 现代化暗黑高对比度工业 QSS 样式设计；
+   - 集成基于 OpenGL 的交互式三维点云视窗（支持按 Z 深度伪彩色渐变着色、鼠标任意旋转/平移/缩放、重置视角、点大小调节）；
+   - 点云格式支持导出标准 ASCII PLY（MeshLab/CloudCompare 即开即显）与制表符分隔 TXT。
+
+---
+
+## 📁 目录结构
+
+```text
+D:\ZhenWork\DLP4710\
+│
+├── dlp_common/                              # 共享核心算法与硬件抽象库
+│   ├── config.py                            # 全局默认参数与设备规格配置
+│   ├── fringe/                              # 条纹生成与相位解包
+│   │   ├── generator.py                     # 水平/竖直正弦条纹生成(三频四步)
+│   │   ├── phase_unwrapping.py              # 四步相移、三频外差绝对相位解包、表面调制掩膜
+│   │   └── utils.py                         # 亚像素双线性插值实用函数
+│   ├── calibration/                         # 标定算法引擎
+│   │   ├── models.py                        # 数据模型 (CalibrationPose, CalibrationView, CalibrationResult)
+│   │   ├── corner_detector.py               # 棋盘格亚像素角点检测 (findChessboardCornersSB + cornerSubPix)
+│   │   ├── telecentric_camera.py            # 远心相机 2x4 仿射矩阵投影与 5 参数畸变
+│   │   ├── scheimpflug_dlp.py               # DLP 投影仪 Scheimpflug 倾斜模型与行光平面法向量
+│   │   ├── joint_optimizer.py               # Huber 鲁棒损失系统联合优化求解器 (LM)
+│   │   └── calib_io.py                      # OpenCV 兼容 YML/TXT 标定参数序列化与反序列化
+│   ├── reconstruction/                      # 单目三维重建引擎
+│   │   ├── reconstructor.py                 # 远心光轴平行射线、行光平面相交、Newton-二分混合高精度求解器
+│   │   └── point_cloud_io.py                # 标准 PLY (ASCII) 与 TXT 点云文件读写
+│   └── hardware/                            # 硬件控制抽象层
+│       ├── dlp_controller.py                # DLP4710 ctypes 驱动封装 (含仿真模式)
+│       └── daheng_camera.py                 # 大恒工业相机接口驱动封装 (含实时/离线序列播放)
+│
+├── DLP4710_MonoSL_Calibration/              # 标定软件系统工程
+│   ├── app.py                               # 标定应用主程序入口
+│   ├── core/                                # 标定业务流程与多线程 Worker
+│   │   ├── controller.py                    # 标定业务控制器
+│   │   └── workers.py                       # QThread 异步任务 (批量角点检测、相位解算、联合标定、BIN烧录)
+│   └── ui/                                  # 标定交互界面
+│       ├── main_window.py                   # 标定主窗口
+│       ├── widgets.py                       # 图像显示(角点矢量标注)、姿态管理表格
+│       └── styles.py                        # 现代化工业 UI 样式表
+│
+├── SL-3D-Measurement-DLP4710-SingleCamera/  # 3D测量软件系统工程
+│   ├── app.py                               # 测量应用主程序入口
+│   ├── core/                                # 测量业务流程与多线程 Worker
+│   │   ├── controller.py                    # 测量业务控制器
+│   │   └── workers.py                       # QThread 异步任务 (在线采集、离线计算、点云重构)
+│   └── ui/                                  # 测量交互界面
+│       ├── main_window.py                   # 测量主窗口
+│       ├── gl_view.py                       # 交互式 3D OpenGL 点云渲染视窗
+│       ├── widgets.py                       # 2D 过程视图 (原始帧、包裹相位、绝对相位、调制掩膜)
+│       └── styles.py                        # 工业暗黑 UI 样式表
+│
+├── bin_and_templates/                       # 模板标定文件与预置 DLP 固件
+│   ├── MonoSLCalibration.yml                # 标定参数模板 (与C++通用)
+│   └── mySL3x4.bin                          # DLP 24 帧标定 pattern 固件
+├── libs/                                    # 64 位外部动态链接库
+│   ├── DLP4710Control.dll                   # DLP4710 控制 DLL
+│   └── cyusbserial.dll                      # Cypress USB-I2C 桥接驱动库
+├── tests/                                   # 自动化单元测试套件
+│   ├── test_fringe.py                       # 条纹生成与解相正确性测试
+│   ├── test_calibration.py                  # 标定模型与 YAML 往返读写测试
+│   ├── test_reconstruction.py               # 3D 重建算法与真实标定参数相交测试
+│   └── test_hardware.py                     # 硬件控制器与 Mock 模式测试
+│
+├── run_calibration.bat                      # Windows 一键启动标定软件脚本
+├── run_measurement.bat                      # Windows 一键启动测量软件脚本
+├── run_calibration.py                       # Python 标定软件启动入口
+├── run_measurement.py                       # Python 测量软件启动入口
+├── pyproject.toml                           # 标准 Python 项目配置
+└── README.md                                # 项目使用与开发全景文档
+```
+
+---
+
+## 🛠️ 环境准备与包管理
+
+本项目指定在 **Conda 环境 `dlp`** 下运行，使用 **`uv`** 进行极速包依赖管理。
+
+### 1. 确认 Python 解释器
+- 环境路径：`D:\ZhenSoft\Miniconda\envs\dlp\python.exe`
+- Python 版本：`3.13.0` (x86_64)
+
+### 2. 包安装（使用 `uv`）
+已在 `dlp` 环境中预装全部核心依赖。如需在新环境重新安装，可执行：
+```bash
+uv pip install --python "D:\ZhenSoft\Miniconda\envs\dlp\python.exe" numpy scipy opencv-python pyyaml PyQt6 pyqtgraph PyOpenGL
+```
+
+### 3. 运行完整自动化测试
+验证所有数学算法与依赖正常运行：
+```bash
+& "D:\ZhenSoft\Miniconda\envs\dlp\python.exe" -m unittest discover -s "D:\ZhenWork\DLP4710\tests" -v
+```
+测试项包括：
+- `test_calibration_io_roundtrip`: YAML 标定文件无损保存与反序列化测试
+- `test_fit_linear_affine`: 远心相机仿射矩阵 SVD 线性求解测试
+- `test_telecentric_forward_and_undistort`: 5 参数高阶畸变正反投影数值测试
+- `test_fringe_generation`: 12 帧水平与竖直正弦条纹生成测试
+- `test_phase_unwrapping_monotonicity`: 三频四步外差绝对相位单调性测试
+- `test_load_real_calibration`: 载入实际标定文件与深度范围判定测试
+- `test_reconstruct_point_synthetic`: 远心平行光线与 DLP 行光平面高精度相交测试
+- `test_point_cloud_export`: PLY 与 TXT 点云文件输出测试
+- `test_hardware`: DLP 控制器与相机接口测试
+
+---
+
+## 🚀 启动与使用指南
+
+### 一、标定软件（DLP4710_MonoSL_Calibration）
+
+#### 启动方式：
+1. **Windows 双击启动**：双击 `run_calibration.bat`。
+2. **命令行启动**：
+   ```bash
+   & "D:\ZhenSoft\Miniconda\envs\dlp\python.exe" "D:\ZhenWork\DLP4710\run_calibration.py"
+   ```
+
+#### 标定操作流程：
+1. **设备连接与固件配置**：
+   - 点击 **“检测设备”** 确认工业相机与 DLP 投影仪在线。
+   - 点击 **“连接设备”** 建立通讯。
+   - 如需在线投影标定，在 **“选择BIN”** 中选取 `bin_and_templates\mySL_calib_12horAnd12vec.bin`，点击 **“烧录BIN”**。
+2. **生成条纹图像（可选）**：
+   - 点击 **“生成12张水平条纹”** 或 **“生成12张竖直条纹”**，可将标准正弦图像导出至指定文件夹以供制作新固件。
+3. **姿态采集与导入**：
+   - **在线采集**：调整标定板位置，点击 **“采集当前姿态 (1+24)”**。
+   - **离线导入**：点击 **“导入离线姿态”**，选取包含基底图（`0.bmp`）和 24 帧条纹图的文件夹（至少导入 8 组不同倾斜角度姿态）。
+4. **批量解算与联合标定**：
+   - 设置棋盘格规格（默认内角点：列 11、行 8，间距 5.0 mm）。
+   - 点击 **“批量检测角点”**，左侧图像区将呈现带彩色连接线与高精度十字标记的检测结果。
+   - 点击 **“批量相位解算”**，自动进行三频外差解包，右侧视图显示展开相位。
+   - 点击 **“系统联合标定”**，后台多线程执行 LM 非线性优化，输出系统 RMS 重投影误差（像素级精度）。
+5. **保存标定结果**：
+   - 点击 **“保存YML与TXT”**，导出 `MonoSLCalibration.yml` 和详细分析报告 `MonoSLCalibration.txt`。
+
+---
+
+### 二、三维测量软件（SL-3D-Measurement-DLP4710-SingleCamera）
+
+#### 启动方式：
+1. **Windows 双击启动**：双击 `run_measurement.bat`。
+2. **命令行启动**：
+   ```bash
+   & "D:\ZhenSoft\Miniconda\envs\dlp\python.exe" "D:\ZhenWork\DLP4710\run_measurement.py"
+   ```
+
+#### 测量操作流程：
+1. **加载标定参数**：
+   - 软件启动时会自动查找并加载 `bin_and_templates\MonoSLCalibration.yml`。若需更换，点击 **“浏览...”** 并点击 **“加载参数”**。
+2. **相机调焦与曝光**：
+   - 调整曝光时间（μs）与增益（dB），点击 **“开启实时预览”**，确保被测物表面清晰且条纹对比度充盈（不过曝）。调焦完成后关闭预览。
+3. **采集与三维重构**：
+   - **在线测量**：点击 **“采集并执行3D测量 (12帧)”**，系统自动触发 DLP 与相机同步采集 12 帧水平条纹并进行三维重构。
+   - **离线测量**：点击 **“导入离线12帧图像并测量”**，选取历史扫描目录。
+4. **交互式三维可视化**：
+   - 重构完成后自动切换至 **“交互式三维点云视图”**；
+   - 鼠标左键拖拽旋转、中键滚轮缩放、右键平移；
+   - 支持实时切换 **Turbo/Viridis (按Z深度)**、**彩虹色 (Rainbow)** 或 **单色** 着色方案，支持自由调节点大小。
+   - 切换到 **“二维过程视图”** 可审查原始条纹、包裹相位、绝对相位与表面有效调制掩膜。
+5. **点云导出**：
+   - 点击 **“导出标准 PLY 点云”**：生成带空间坐标的 `.ply` 文件，兼容 MeshLab、CloudCompare、SolidWorks 等主流软件；
+   - 点击 **“导出 TXT (X Y Z) 坐标”**：生成制表符分隔三维文本数据，便于在 MATLAB 或 Python 中直接进行几何测量与点云分析。
+

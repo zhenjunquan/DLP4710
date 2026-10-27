@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dlp4710-monosl"
+version = "1.0.0"
+description = "Engineering Python suite for DLP4710 Mono Structured Light Calibration and 3D Measurement"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "opencv-python>=4.8",
+    "pyyaml>=6.0",
+    "PyQt6>=6.5",
+    "pyqtgraph>=0.13",
+    "PyOpenGL>=3.1",
+]
+
+[project.scripts]
+dlp-calib = "DLP4710_MonoSL_Calibration.app:main"
+dlp-measure = "run_measurement:main"
+
+[tool.setuptools]
+py-modules = ["run_calibration", "run_measurement"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "dlp_common*",
+    "DLP4710_MonoSL_Calibration*",
+    "SL-3D-Measurement-DLP4710-SingleCamera*",
+]
+exclude = ["tests*"]
+namespaces = true
+
