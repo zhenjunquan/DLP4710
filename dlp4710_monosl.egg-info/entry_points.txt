@@ -1,3 +1,0 @@
-[console_scripts]
-dlp-calib = DLP4710_MonoSL_Calibration.app:main
-dlp-measure = run_measurement:main
