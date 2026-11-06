@@ -739,11 +739,13 @@ class CalibrationMainWindow(QMainWindow):
             self.view_board.set_mat_image(board, pose.camera_corners)
             phase = pose.horizontal_phase
             phase_path = self.controller.pose_phase_path(pose)
-            if phase is None and phase_path and os.path.isfile(phase_path):
+            if phase is None and pose.phase_valid and phase_path and os.path.isfile(phase_path):
                 phase = np.load(phase_path, mmap_mode="r")
             phase_badge = ""
-            if phase is not None:
+            if phase is not None and pose.phase_valid:
                 phase_badge = f"水平相位 | {phase.shape[1]}x{phase.shape[0]} | 硬盘按需加载"
+            else:
+                phase = None
             self.view_phase.set_mat_image(phase, badge=phase_badge)
 
     def _on_board_param_changed(self):

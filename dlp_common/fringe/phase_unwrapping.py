@@ -108,18 +108,8 @@ class PhaseProcessor:
         if len(frame_paths) != expected:
             raise ValueError(f"Expected {expected} frame paths, got {len(frame_paths)}.")
 
-        first = cv2.imread(frame_paths[0], cv2.IMREAD_GRAYSCALE)
-        if first is None:
-            raise OSError(f"无法读取条纹图像: {frame_paths[0]}")
-        image_h, image_w = first.shape[:2]
-        if roi is None:
-            rx, ry, rw, rh = 0, 0, image_w, image_h
-        else:
-            rx, ry, rw, rh = roi
-            rx = max(0, min(rx, image_w - 1))
-            ry = max(0, min(ry, image_h - 1))
-            rw = max(1, min(rw, image_w - rx))
-            rh = max(1, min(rh, image_h - ry))
+        image_h, image_w = None, None
+        rx, ry, rw, rh = 0, 0, 0, 0
 
         wrapped_phases = []
         modulations = []
@@ -128,8 +118,22 @@ class PhaseProcessor:
             start = frequency_index * self.step_num
             for path in frame_paths[start : start + self.step_num]:
                 frame = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-                if frame is None or frame.shape[:2] != (image_h, image_w):
-                    raise OSError(f"条纹图像无法读取或尺寸不一致: {path}")
+                if frame is None:
+                    raise OSError(f"条纹图像无法读取: {path}")
+
+                if image_h is None:
+                    image_h, image_w = frame.shape[:2]
+                    if roi is None:
+                        rx, ry, rw, rh = 0, 0, image_w, image_h
+                    else:
+                        rx, ry, rw, rh = roi
+                        rx = max(0, min(rx, image_w - 1))
+                        ry = max(0, min(ry, image_h - 1))
+                        rw = max(1, min(rw, image_w - rx))
+                        rh = max(1, min(rh, image_h - ry))
+                elif frame.shape[:2] != (image_h, image_w):
+                    raise OSError(f"条纹图像尺寸不一致: {path}")
+
                 cropped = frame[ry : ry + rh, rx : rx + rw]
                 mats.append(
                     cv2.GaussianBlur(cropped, self.blur_kernel_size, self.blur_sigma).astype(np.float64)
@@ -169,9 +173,12 @@ class PhaseProcessor:
         phase1, phase2, phase3 = wrapped[0], wrapped[1], wrapped[2]
 
         # Phase differences in [0, 1):
-        diff_1_2 = np.where(phase1 - phase2 >= -1e-5, phase1 - phase2, 1.0 + phase1 - phase2)
-        diff_2_3 = np.where(phase2 - phase3 >= -1e-5, phase2 - phase3, 1.0 + phase2 - phase3)
-        diff_12_23 = np.where(diff_1_2 - diff_2_3 >= -1e-5, diff_1_2 - diff_2_3, 1.0 + diff_1_2 - diff_2_3)
+        diff_1_2 = phase1 - phase2
+        diff_1_2 = np.where(diff_1_2 >= -1e-5, diff_1_2, 1.0 + diff_1_2)
+        diff_2_3 = phase2 - phase3
+        diff_2_3 = np.where(diff_2_3 >= -1e-5, diff_2_3, 1.0 + diff_2_3)
+        diff_12_23 = diff_1_2 - diff_2_3
+        diff_12_23 = np.where(diff_12_23 >= -1e-5, diff_12_23, 1.0 + diff_12_23)
 
         # Periods: p = 1 / lambda
         p1 = 1.0 / self.periods[0]

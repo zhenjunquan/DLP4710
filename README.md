@@ -39,6 +39,9 @@ D:\ZhenWork\DLP4710\
 │
 ├── dlp_common/                              # 共享核心算法与硬件抽象库
 │   ├── config.py                            # 全局默认参数与设备规格配置
+│   ├── focus/                               # 对焦评价核心算法与动态状态追踪
+│   │   ├── focus_metric.py                  # 清晰度评价算子 (Laplacian/Tenengrad/Brenner/SML) 与 Focus Peaking
+│   │   └── focus_tracker.py                 # 动态峰值保持、景深容限判定与过冲状态机
 │   ├── fringe/                              # 条纹生成与相位解包
 │   │   ├── generator.py                     # 水平/竖直正弦条纹生成(三频四步)
 │   │   ├── phase_unwrapping.py              # 四步相移、三频外差绝对相位解包、表面调制掩膜
@@ -78,6 +81,16 @@ D:\ZhenWork\DLP4710\
 │       ├── widgets.py                       # 2D 过程视图 (原始帧、包裹相位、绝对相位、调制掩膜)
 │       └── styles.py                        # 工业暗黑 UI 样式表
 │
+├── DLP4710_Focus_Assistant/                 # 结构光微距对焦助手工程 (景深 3mm 动态辅助)
+│   ├── app.py                               # 对焦助手主程序入口
+│   ├── core/                                # 对焦业务流程与流采 Worker
+│   │   ├── focus_controller.py              # 对焦控制器 (相机采集、清晰度评估、ROI 管理)
+│   │   └── workers.py                       # QThread 高帧率无卡顿实时流采线程 (~30 FPS)
+│   └── ui/                                  # 对焦交互界面
+│       ├── main_window.py                   # 对焦助手主窗口
+│       ├── widgets.py                       # 交互式视频画布(鼠标拖拽ROI/准星)、滚动趋势折线图、大状态卡片
+│       └── styles.py                        # 工业暗黑 UI 样式表 (含已验证 SpinBox)
+│
 ├── bin_and_templates/                       # 模板标定文件与预置 DLP 固件
 │   ├── MonoSLCalibration.yml                # 标定参数模板 (与C++通用)
 │   └── mySL3x4.bin                          # DLP 24 帧标定 pattern 固件
@@ -88,12 +101,14 @@ D:\ZhenWork\DLP4710\
 │   ├── test_fringe.py                       # 条纹生成与解相正确性测试
 │   ├── test_calibration.py                  # 标定模型与 YAML 往返读写测试
 │   ├── test_reconstruction.py               # 3D 重建算法与真实标定参数相交测试
-│   └── test_hardware.py                     # 硬件控制器与 Mock 模式测试
+│   ├── test_hardware.py                     # 硬件控制器与 Mock 模式测试
+│   └── test_focus.py                        # 对焦评价算子、动态峰值追踪与 UI 测试
 │
 ├── run_calibration.bat                      # Windows 一键启动标定软件脚本
 ├── run_measurement.bat                      # Windows 一键启动测量软件脚本
 ├── run_calibration.py                       # Python 标定软件启动入口
 ├── run_measurement.py                       # Python 测量软件启动入口
+├── run_focus.py                             # Python 对焦助手启动入口
 ├── pyproject.toml                           # 标准 Python 项目配置
 └── README.md                                # 项目使用与开发全景文档
 ```

@@ -5,6 +5,7 @@ Controller orchestrating business logic and state for calibration software.
 import os
 import re
 import shutil
+import threading
 from datetime import datetime
 from typing import List, Optional, Sequence, Tuple, Union
 import cv2
@@ -62,6 +63,7 @@ class CalibrationController:
 
         self.poses: List[CalibrationPose] = []
         self.calibration_result: Optional[CalibrationResult] = None
+        self._session_lock = threading.Lock()
         self.bin_path: str = ""
         self.session_output_folder: str = ""
 
@@ -196,27 +198,6 @@ class CalibrationController:
         pose = CalibrationPose(name=pose_name, folder_path=folder_path)
         pose.board_image = board_img
         pose.camera_image_size = (board_img.shape[1], board_img.shape[0])
-
-        # Automatically load pre-extracted corners if available
-        cam_corners_path = os.path.join(folder_path, "camera_corners.npy")
-        if os.path.isfile(cam_corners_path):
-            try:
-                corners = np.load(cam_corners_path)
-                if corners is not None and len(corners) > 0:
-                    pose.camera_corners = corners.astype(np.float32)
-                    pose.corner_valid = True
-            except Exception:
-                pass
-
-        proj_corners_path = os.path.join(folder_path, "projector_corners.npy")
-        if os.path.isfile(proj_corners_path):
-            try:
-                proj_corners = np.load(proj_corners_path)
-                if proj_corners is not None and len(proj_corners) > 0:
-                    pose.projector_corners = proj_corners.astype(np.float32)
-                    pose.phase_valid = True
-            except Exception:
-                pass
 
         self.poses.append(pose)
         self.calibration_result = None
@@ -454,12 +435,13 @@ class CalibrationController:
             f"最终标定参数: {'已保存' if final_saved else '尚未保存或尚未完成标定'}",
             "说明: 原始图像和相位中间结果在每个姿态处理完成后立即写入硬盘。",
         ]
-        with open(
-            os.path.join(self.session_output_folder, "calibration_session.txt"),
-            "w",
-            encoding="utf-8",
-        ) as stream:
-            stream.write("\n".join(lines) + "\n")
+        with self._session_lock:
+            with open(
+                os.path.join(self.session_output_folder, "calibration_session.txt"),
+                "w",
+                encoding="utf-8",
+            ) as stream:
+                stream.write("\n".join(lines) + "\n")
 
     def finalize_incremental_session(self) -> Tuple[bool, str]:
         if not self.session_output_folder:

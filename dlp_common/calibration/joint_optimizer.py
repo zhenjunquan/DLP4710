@@ -27,7 +27,8 @@ class JointCalibrationEngine:
         projector_image_size: Tuple[int, int] = (1920, 1080),
         board_size: Tuple[int, int] = (11, 8),
         square_size_mm: float = 3.0,
-        enable_scheimpflug_tilt: bool = True,
+        # enable_scheimpflug_tilt: bool = True,
+        enable_scheimpflug_tilt: bool = False,
         enable_projector_tangential: bool = False,
         enable_camera_distortion: bool = True,
         enable_camera_k3: bool = False,
@@ -194,18 +195,14 @@ class JointCalibrationEngine:
 
         # Nonlinear refinement for camera affine and distortion
         if self.enable_camera_distortion:
-            # Match the C++ solver: k3 stays fixed unless explicitly enabled and
-            # Huber weighting is applied to each (x, y) residual pair.
             camera_params = np.hstack([affine_2x4.flatten(), dist_cam_5])
             camera_active = list(range(12))
             if self.enable_camera_k3:
                 camera_active.append(12)
 
-            def cam_residuals(active_params):
-                params = camera_params.copy()
-                params[camera_active] = active_params
-                aff = params[0:8].reshape(2, 4)
-                d5 = params[8:13]
+            def cam_residuals(p):
+                aff = p[0:8].reshape(2, 4)
+                d5 = p[8:13]
                 res = []
                 for v_idx in range(len(views)):
                     pred = project_telecentric_point(
@@ -219,16 +216,15 @@ class JointCalibrationEngine:
                 return np.concatenate(res)
 
             try:
-                res_cam = least_squares(
+                ok_cam, cam_opt_p = self._run_levenberg_marquardt(
+                    camera_params,
+                    camera_active,
                     cam_residuals,
-                    camera_params[camera_active],
-                    loss="linear",
-                    max_nfev=self.camera_only_iterations,
+                    max_iterations=self.camera_only_iterations,
                 )
-                if res_cam.success:
-                    camera_params[camera_active] = res_cam.x
-                    affine_2x4 = camera_params[0:8].reshape(2, 4)
-                    dist_cam_5 = camera_params[8:13]
+                if ok_cam:
+                    affine_2x4 = cam_opt_p[0:8].reshape(2, 4)
+                    dist_cam_5 = cam_opt_p[8:13]
             except Exception as e:
                 result.warnings.append(f"远心相机非线性畸变优化异常: {e}")
 
@@ -240,7 +236,7 @@ class JointCalibrationEngine:
         # -------------------------------------------------------------
         if self.run_joint_optimization:
             num_views = len(views)
-            # Parameter vector packing:
+            # Parameter vector packing matching C++:
             # [0..3]: fx, fy, cx, cy
             # [4..9]: k1, k2, p1, p2, tauX, tauY
             # [10..17]: affine 2x4 (8)
@@ -280,28 +276,15 @@ class JointCalibrationEngine:
                 if self.enable_camera_k3:
                     joint_active.append(22)
             joint_active.extend(range(23, len(joint_params_0)))
-            lower = np.full(len(joint_active), -np.inf, dtype=np.float64)
-            upper = np.full(len(joint_active), np.inf, dtype=np.float64)
-            active_position = {parameter_index: i for i, parameter_index in enumerate(joint_active)}
-            for parameter_index in (0, 1):
-                if parameter_index in active_position:
-                    lower[active_position[parameter_index]] = 10.0
-                    upper[active_position[parameter_index]] = 1e7
-            for parameter_index in (8, 9):
-                if parameter_index in active_position:
-                    lower[active_position[parameter_index]] = -1.2
-                    upper[active_position[parameter_index]] = 1.2
-            for view_index in range(num_views):
-                tz_index = 23 + 6 * view_index + 5
-                lower[active_position[tz_index]] = 1e-6
 
-            def joint_residuals(active_params):
-                p = joint_params_0.copy()
-                p[joint_active] = active_params
-                # Unpack
+            def joint_residuals(p):
+                fx, fy, cx, cy = p[0], p[1], p[2], p[3]
+                if fx <= 10.0 or fy <= 10.0 or abs(p[8]) > 1.2 or abs(p[9]) > 1.2:
+                    return None
+
                 kp_mat = np.array([
-                    [p[0], 0.0, p[2]],
-                    [0.0, p[1], p[3]],
+                    [fx, 0.0, cx],
+                    [0.0, fy, cy],
                     [0.0, 0.0, 1.0],
                 ], dtype=np.float64)
 
@@ -318,9 +301,10 @@ class JointCalibrationEngine:
                 for v in range(num_views):
                     rv = p[pose_base + 6 * v : pose_base + 6 * v + 3]
                     tv = p[pose_base + 6 * v + 3 : pose_base + 6 * v + 6]
-                    r_mat, _ = cv2.Rodrigues(rv)
+                    if tv[2] <= 1e-6:
+                        return None
 
-                    # 3D points in DLP coordinates
+                    r_mat, _ = cv2.Rodrigues(rv)
                     pts_dlp = (r_mat @ views[v].object_points.T).T + tv.reshape(1, 3)
 
                     # Camera prediction
@@ -336,16 +320,14 @@ class JointCalibrationEngine:
                 return np.concatenate(res)
 
             try:
-                joint_opt = least_squares(
+                ok_joint, opt_p = self._run_levenberg_marquardt(
+                    joint_params_0,
+                    joint_active,
                     joint_residuals,
-                    joint_params_0[joint_active],
-                    loss="linear",
-                    max_nfev=self.joint_iterations,
-                    bounds=(lower, upper),
+                    max_iterations=self.joint_iterations,
                 )
-                if joint_opt.success:
-                    p = joint_params_0.copy()
-                    p[joint_active] = joint_opt.x
+                if ok_joint:
+                    p = opt_p
                     result.projector_matrix = np.array([
                         [p[0], 0.0, p[2]],
                         [0.0, p[1], p[3]],
@@ -425,4 +407,83 @@ class JointCalibrationEngine:
         robust = lengths > self.huber_delta
         weights[robust] = np.sqrt(self.huber_delta / lengths[robust])
         return (pairs * weights[:, None]).ravel()
+
+    def _run_levenberg_marquardt(
+        self,
+        parameters: np.ndarray,
+        active_indices: List[int],
+        residual_fn,
+        max_iterations: int = 25,
+    ) -> Tuple[bool, np.ndarray]:
+        """
+        Custom Levenberg-Marquardt optimizer with column-normalized Jacobian.
+        Exact numerical port of C++ CalibrationEngine.cpp runLevenbergMarquardt.
+        """
+        params = np.asarray(parameters, dtype=np.float64).copy()
+        res = residual_fn(params)
+        if res is None or len(res) == 0:
+            return False, params
+
+        cost = float(np.dot(res, res))
+        if not np.isfinite(cost):
+            return False, params
+
+        n_active = len(active_indices)
+        n_res = len(res)
+        lam = 1e-3
+
+        for iteration in range(max_iterations):
+            # Compute numerical Jacobian for active columns
+            J = np.zeros((n_res, n_active), dtype=np.float64)
+            for col, idx in enumerate(active_indices):
+                val = params[idx]
+                step = 1e-7 if abs(val) < 0.1 else 1e-6 * max(1.0, abs(val))
+                p_pert = params.copy()
+                p_pert[idx] += step
+                r_pert = residual_fn(p_pert)
+                if r_pert is None or len(r_pert) != n_res:
+                    return False, params
+                J[:, col] = (r_pert - res) / step
+
+            # Column normalization improves conditioning across diverse units
+            col_norms = np.linalg.norm(J, axis=0)
+            col_norms[col_norms < 1e-12] = 1.0
+            J_scaled = J / col_norms
+
+            JtJ = J_scaled.T @ J_scaled
+            grad = J_scaled.T @ res
+
+            step_accepted = False
+            cost_drop = 0.0
+            for _ in range(10):
+                damped = JtJ + lam * np.eye(n_active)
+                try:
+                    delta = np.linalg.solve(damped, -grad)
+                except np.linalg.LinAlgError:
+                    lam = min(1e12, lam * 10.0)
+                    continue
+
+                p_cand = params.copy()
+                p_cand[active_indices] += delta / col_norms
+                r_cand = residual_fn(p_cand)
+                if r_cand is None or len(r_cand) != n_res:
+                    lam = min(1e12, lam * 10.0)
+                    continue
+
+                c_cand = float(np.dot(r_cand, r_cand))
+                if np.isfinite(c_cand) and c_cand < cost:
+                    cost_drop = (cost - c_cand) / max(1.0, cost)
+                    params = p_cand
+                    res = r_cand
+                    cost = c_cand
+                    lam = max(1e-12, lam * 0.3)
+                    step_accepted = True
+                    break
+                lam = min(1e12, lam * 10.0)
+
+            if not step_accepted or cost_drop < 1e-7:
+                break
+
+        return True, params
+
 

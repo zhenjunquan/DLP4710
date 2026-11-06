@@ -31,7 +31,8 @@ class SystemConfig:
     # Algorithm hyperparameters
     phase_roi_margin: int = 32
     minimum_view_count: int = 8
-    enable_scheimpflug_tilt: bool = True
+    # enable_scheimpflug_tilt: bool = True
+    enable_scheimpflug_tilt: bool = False
     enable_projector_tangential: bool = False
     enable_camera_distortion: bool = True
     enable_camera_k3: bool = False

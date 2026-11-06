@@ -56,6 +56,10 @@ class TestCalibrationUi(unittest.TestCase):
                 cv2.imwrite(os.path.join(p1, "board.bmp"), dummy_img)
                 cv2.imwrite(os.path.join(p2, "board.bmp"), dummy_img)
 
+                # Put old results in p1 to ensure import does NOT load them
+                np.save(os.path.join(p1, "camera_corners.npy"), np.ones((4, 2), dtype=np.float32))
+                np.save(os.path.join(p1, "projector_corners.npy"), np.ones((4, 2), dtype=np.float32))
+
                 # Test find_pose_folders from parent root
                 found = window.controller.find_pose_folders(root)
                 self.assertEqual(len(found), 2)
@@ -66,6 +70,15 @@ class TestCalibrationUi(unittest.TestCase):
                 count, poses, msgs = window.controller.add_poses_from_folders([p1, p2])
                 self.assertEqual(count, 2)
                 self.assertEqual(len(window.controller.poses), 2)
+
+                # Ensure imported poses are clean (no stale corners or phases)
+                p1_imported = window.controller.poses[0]
+                self.assertFalse(p1_imported.corner_valid)
+                self.assertFalse(p1_imported.phase_valid)
+                self.assertIsNone(p1_imported.camera_corners)
+                self.assertIsNone(p1_imported.projector_corners)
+                self.assertIsNone(p1_imported.horizontal_phase)
+
                 window._refresh_pose_table()
                 self.assertEqual(window.table_poses.rowCount(), 2)
 
@@ -117,6 +130,47 @@ class TestCalibrationUi(unittest.TestCase):
             self.assertEqual(spin.value(), initial_val)
         finally:
             window.close()
+
+    def test_multithreaded_decode_phases_worker(self):
+        from DLP4710_MonoSL_Calibration.core.workers import DecodePhasesWorker
+        from dlp_common.fringe.phase_unwrapping import PhaseProcessor
+
+        # Create two minimal poses with in-memory frames
+        processor = PhaseProcessor()
+        poses = []
+        for idx in range(2):
+            h_frames = [np.full((32, 32), 128 + 50 * np.cos(i), dtype=np.uint8) for i in range(12)]
+            v_frames = [np.full((32, 32), 128 + 50 * np.cos(i), dtype=np.uint8) for i in range(12)]
+            corners = np.array([[8.0, 8.0], [24.0, 8.0], [8.0, 24.0], [24.0, 24.0]], dtype=np.float32)
+            pose = CalibrationPose(
+                name=f"Pose_{idx:02d}",
+                camera_corners=corners,
+                camera_image_size=(32, 32),
+                horizontal_frames=h_frames,
+                vertical_frames=v_frames,
+                corner_valid=True,
+            )
+            poses.append(pose)
+
+        worker = DecodePhasesWorker(
+            poses=poses,
+            processor=processor,
+            projector_size=(1920, 1080),
+            roi_margin=4,
+            max_workers=2,
+        )
+
+        progress_calls = []
+        worker.progress.connect(lambda cur, tot, msg: progress_calls.append((cur, tot, msg)))
+        worker.run()
+
+        self.assertEqual(len(progress_calls), 3)  # initial 0, then 1, then 2
+        for pose in poses:
+            self.assertTrue(pose.phase_valid)
+            self.assertIsNotNone(pose.horizontal_phase)
+            self.assertIsNotNone(pose.vertical_phase)
+            self.assertIsNotNone(pose.projector_corners)
+            self.assertEqual(len(pose.projector_corners), 4)
 
 
 if __name__ == "__main__":

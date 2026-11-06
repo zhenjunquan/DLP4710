@@ -4,6 +4,8 @@ Asynchronous QThread workers for responsive UI during calibration and image proc
 
 import os
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Optional, Tuple
 import cv2
 import numpy as np
@@ -157,45 +159,99 @@ class CapturePoseWorker(QThread):
 
 
 class DetectCornersWorker(QThread):
-    """Batch chessboard corner detection worker."""
+    """Batch chessboard corner detection worker with multi-threaded concurrency."""
     progress = pyqtSignal(int, int, str)  # current, total, pose_name
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, poses: List[CalibrationPose], detector: CornerDetector):
+    def __init__(
+        self,
+        poses: List[CalibrationPose],
+        detector: CornerDetector,
+        max_workers: Optional[int] = None,
+    ):
         super().__init__()
         self.poses = poses
         self.detector = detector
+        self._cancel_requested = False
+        if max_workers is not None and max_workers > 0:
+            self.max_workers = max_workers
+        else:
+            cpu_count = os.cpu_count() or 4
+            self.max_workers = min(max(2, cpu_count // 2), 6)
+
+    def _detect_single_pose(self, pose: CalibrationPose) -> bool:
+        if self._cancel_requested:
+            return False
+
+        if pose.board_image is None and pose.folder_path:
+            board_path = os.path.join(pose.folder_path, "0.bmp")
+            if not os.path.isfile(board_path):
+                board_path = os.path.join(pose.folder_path, "board.bmp")
+            if os.path.isfile(board_path):
+                pose.board_image = cv2.imread(board_path, cv2.IMREAD_GRAYSCALE)
+
+        if pose.board_image is not None:
+            pose.camera_image_size = (pose.board_image.shape[1], pose.board_image.shape[0])
+            ok, corners, msg = self.detector.detect_corners(pose.board_image)
+            if ok and corners is not None:
+                pose.camera_corners = corners
+                pose.corner_valid = True
+                return True
+        pose.corner_valid = False
+        return False
 
     def run(self):
         total = len(self.poses)
+        if total == 0:
+            self.finished.emit(True, "姿态列表为空")
+            return
+
         success_count = 0
-        for i, pose in enumerate(self.poses):
-            self.progress.emit(i + 1, total, f"检测角点: {pose.name}")
-            if pose.board_image is None and pose.folder_path:
-                # Load board image from folder
-                board_path = os.path.join(pose.folder_path, "0.bmp")
-                if not os.path.isfile(board_path):
-                    board_path = os.path.join(pose.folder_path, "board.bmp")
-                if os.path.isfile(board_path):
-                    pose.board_image = cv2.imread(board_path, cv2.IMREAD_GRAYSCALE)
-
-            if pose.board_image is not None:
-                pose.camera_image_size = (pose.board_image.shape[1], pose.board_image.shape[0])
-                ok, corners, msg = self.detector.detect_corners(pose.board_image)
-                if ok and corners is not None:
-                    pose.camera_corners = corners
-                    pose.corner_valid = True
+        if total == 1 or self.max_workers <= 1:
+            for i, pose in enumerate(self.poses):
+                if self._cancel_requested:
+                    break
+                self.progress.emit(i + 1, total, f"检测角点: {pose.name}")
+                if self._detect_single_pose(pose):
                     success_count += 1
-                else:
-                    pose.corner_valid = False
-            else:
-                pose.corner_valid = False
+        else:
+            completed_count = 0
+            lock = threading.Lock()
+            self.progress.emit(0, total, f"多线程检测角点中 (并发数: {self.max_workers})...")
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_map = {
+                    executor.submit(self._detect_single_pose, pose): pose
+                    for pose in self.poses
+                }
+                for future in as_completed(future_map):
+                    if self._cancel_requested:
+                        break
+                    pose = future_map[future]
+                    try:
+                        ok = future.result()
+                    except Exception:
+                        ok = False
 
-        self.finished.emit(True, f"批量角点检测完成: {success_count}/{total} 个姿态成功检测")
+                    with lock:
+                        completed_count += 1
+                        if ok:
+                            success_count += 1
+                        cur = completed_count
+
+                    self.progress.emit(cur, total, f"检测角点 ({cur}/{total}): {pose.name}")
+
+        self.finished.emit(
+            True,
+            f"批量角点检测完成 (并发线程数: {self.max_workers}): {success_count}/{total} 个姿态成功检测"
+        )
+
+    def stop(self):
+        self._cancel_requested = True
+        self.wait(2000)
 
 
 class DecodePhasesWorker(QThread):
-    """Batch phase unwrapping and DLP coordinate mapping worker."""
+    """Batch phase unwrapping and DLP coordinate mapping worker with multi-threaded concurrency."""
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(bool, str)
 
@@ -206,6 +262,7 @@ class DecodePhasesWorker(QThread):
         projector_size: Tuple[int, int],
         roi_margin: int = 32,
         result_saver: Optional[Callable] = None,
+        max_workers: Optional[int] = None,
     ):
         super().__init__()
         self.poses = poses
@@ -213,112 +270,187 @@ class DecodePhasesWorker(QThread):
         self.projector_size = projector_size
         self.roi_margin = roi_margin
         self.result_saver = result_saver
+        self._cancel_requested = False
 
-    def run(self):
-        total = len(self.poses)
-        success_count = 0
-        phase_map_count = 0
-        failures = []
+        if max_workers is not None and max_workers > 0:
+            self.max_workers = max_workers
+        else:
+            cpu_count = os.cpu_count() or 4
+            self.max_workers = min(max(2, cpu_count // 2), 6)
+
+    def _decode_single_pose(self, pose: CalibrationPose) -> Tuple[bool, bool, str]:
+        """
+        Executes phase unwrapping and DLP coordinate calculation for a single pose.
+        Returns:
+            (phase_ok, success, message)
+        """
+        if self._cancel_requested:
+            return False, False, f"{pose.name}: 用户取消"
+
+        if not pose.corner_valid or pose.camera_corners is None:
+            return False, False, f"{pose.name}: 缺少有效棋盘格角点"
+
+        horizontal_paths, vertical_paths = self._find_pose_frame_paths(pose)
+        in_memory = len(pose.horizontal_frames) == 12 and len(pose.vertical_frames) == 12
+        on_disk = len(horizontal_paths) == 12 and len(vertical_paths) == 12
+        if not in_memory and not on_disk:
+            return False, False, (
+                f"{pose.name}: 条纹数量不正确 "
+                f"(内存水平{len(pose.horizontal_frames)}张/竖直{len(pose.vertical_frames)}张，"
+                f"硬盘水平{len(horizontal_paths)}张/竖直{len(vertical_paths)}张)"
+            )
+
+        # Compute ROI around corners
+        pts = pose.camera_corners
+        min_x = max(0, int(np.floor(np.min(pts[:, 0])) - self.roi_margin))
+        max_x = min(pose.camera_image_size[0], int(np.ceil(np.max(pts[:, 0])) + self.roi_margin))
+        min_y = max(0, int(np.floor(np.min(pts[:, 1])) - self.roi_margin))
+        max_y = min(pose.camera_image_size[1], int(np.ceil(np.max(pts[:, 1])) + self.roi_margin))
+        roi = (min_x, min_y, max_x - min_x, max_y - min_y)
+        pose.phase_roi = roi
+
         ref_cycle = self.processor.periods[0]
         proj_w, proj_h = self.projector_size
 
-        for i, pose in enumerate(self.poses):
-            self.progress.emit(i + 1, total, f"相位解算: {pose.name}")
-            if not pose.corner_valid or pose.camera_corners is None:
-                failures.append(f"{pose.name}: 缺少有效棋盘格角点")
-                continue
-
-            horizontal_paths, vertical_paths = self._find_pose_frame_paths(pose)
-            in_memory = len(pose.horizontal_frames) == 12 and len(pose.vertical_frames) == 12
-            on_disk = len(horizontal_paths) == 12 and len(vertical_paths) == 12
-            if not in_memory and not on_disk:
-                failures.append(
-                    f"{pose.name}: 条纹数量不正确 "
-                    f"(内存水平{len(pose.horizontal_frames)}张/竖直{len(pose.vertical_frames)}张，"
-                    f"硬盘水平{len(horizontal_paths)}张/竖直{len(vertical_paths)}张)"
+        try:
+            if in_memory:
+                h_wrapped, h_modulation = self.processor.solve_wrapped_phases(
+                    pose.horizontal_frames, roi=roi
                 )
-                continue
+                v_wrapped, v_modulation = self.processor.solve_wrapped_phases(
+                    pose.vertical_frames, roi=roi
+                )
+            else:
+                h_wrapped, h_modulation = self.processor.solve_wrapped_phases_from_files(
+                    horizontal_paths, roi=roi
+                )
+                v_wrapped, v_modulation = self.processor.solve_wrapped_phases_from_files(
+                    vertical_paths, roi=roi
+                )
 
-            # Compute ROI around corners
-            pts = pose.camera_corners
-            min_x = max(0, int(np.floor(np.min(pts[:, 0])) - self.roi_margin))
-            max_x = min(pose.camera_image_size[0], int(np.ceil(np.max(pts[:, 0])) + self.roi_margin))
-            min_y = max(0, int(np.floor(np.min(pts[:, 1])) - self.roi_margin))
-            max_y = min(pose.camera_image_size[1], int(np.ceil(np.max(pts[:, 1])) + self.roi_margin))
-            roi = (min_x, min_y, max_x - min_x, max_y - min_y)
-            pose.phase_roi = roi
+            if self._cancel_requested:
+                return False, False, f"{pose.name}: 用户取消"
 
-            try:
-                if in_memory:
-                    h_wrapped, h_modulation = self.processor.solve_wrapped_phases(
-                        pose.horizontal_frames, roi=roi
-                    )
-                    v_wrapped, v_modulation = self.processor.solve_wrapped_phases(
-                        pose.vertical_frames, roi=roi
-                    )
-                else:
-                    h_wrapped, h_modulation = self.processor.solve_wrapped_phases_from_files(
-                        horizontal_paths, roi=roi
-                    )
-                    v_wrapped, v_modulation = self.processor.solve_wrapped_phases_from_files(
-                        vertical_paths, roi=roi
-                    )
-                h_unwrapped = self.processor.unwrap_wrapped_phases(h_wrapped)
-                v_unwrapped = self.processor.unwrap_wrapped_phases(v_wrapped)
+            h_unwrapped = self.processor.unwrap_wrapped_phases(h_wrapped)
+            v_unwrapped = self.processor.unwrap_wrapped_phases(v_wrapped)
 
-                pose.horizontal_phase = h_unwrapped
-                pose.vertical_phase = v_unwrapped
-                phase_map_count += 1
+            pose.horizontal_phase = h_unwrapped
+            pose.vertical_phase = v_unwrapped
 
-                # Map camera corners to DLP corners using bilinear interpolation
-                proj_corners = []
-                valid_all = True
-                for c_pt in pose.camera_corners:
-                    local_x = c_pt[0] - roi[0]
-                    local_y = c_pt[1] - roi[1]
+            # Map camera corners to DLP corners using bilinear interpolation
+            proj_corners = []
+            valid_all = True
+            for c_pt in pose.camera_corners:
+                local_x = c_pt[0] - roi[0]
+                local_y = c_pt[1] - roi[1]
 
-                    phi_h = bilinear_sample(h_unwrapped, local_x, local_y)
-                    phi_v = bilinear_sample(v_unwrapped, local_x, local_y)
+                phi_h = bilinear_sample(h_unwrapped, local_x, local_y)
+                phi_v = bilinear_sample(v_unwrapped, local_x, local_y)
 
-                    if not np.isfinite(phi_h) or not np.isfinite(phi_v):
-                        valid_all = False
-                        break
+                if not np.isfinite(phi_h) or not np.isfinite(phi_v):
+                    valid_all = False
+                    break
 
-                    proj_y = (phi_h / ref_cycle) * proj_h
-                    proj_x = (phi_v / ref_cycle) * proj_w
+                proj_y = (phi_h / ref_cycle) * proj_h
+                proj_x = (phi_v / ref_cycle) * proj_w
 
-                    if not (0.0 <= proj_x < proj_w and 0.0 <= proj_y < proj_h):
-                        valid_all = False
-                        break
+                if not (0.0 <= proj_x < proj_w and 0.0 <= proj_y < proj_h):
+                    valid_all = False
+                    break
 
-                    proj_corners.append([proj_x, proj_y])
+                proj_corners.append([proj_x, proj_y])
 
-                if valid_all and len(proj_corners) == len(pose.camera_corners):
-                    pose.projector_corners = np.array(proj_corners, dtype=np.float32)
-                    pose.phase_valid = True
-                    success_count += 1
-                else:
-                    pose.phase_valid = False
-                    failures.append(f"{pose.name}: 相位图已生成，但部分投影坐标无效或越界")
-                if self.result_saver is not None:
-                    self.result_saver(
-                        pose,
-                        h_wrapped,
-                        h_modulation,
-                        v_wrapped,
-                        v_modulation,
-                    )
-            except Exception as exc:
+            if valid_all and len(proj_corners) == len(pose.camera_corners):
+                pose.projector_corners = np.array(proj_corners, dtype=np.float32)
+                pose.phase_valid = True
+                success = True
+                msg = ""
+            else:
                 pose.phase_valid = False
-                failures.append(f"{pose.name}: {exc}")
+                success = False
+                msg = f"{pose.name}: 相位图已生成，但部分投影坐标无效或越界"
+
+            if self.result_saver is not None:
+                self.result_saver(
+                    pose,
+                    h_wrapped,
+                    h_modulation,
+                    v_wrapped,
+                    v_modulation,
+                )
+
+            return True, success, msg
+        except Exception as exc:
+            pose.phase_valid = False
+            return False, False, f"{pose.name}: {exc}"
+
+    def run(self):
+        total = len(self.poses)
+        if total == 0:
+            self.finished.emit(True, "姿态列表为空")
+            return
+
+        success_count = 0
+        phase_map_count = 0
+        failures = []
+
+        # Single pose or single thread mode
+        if total == 1 or self.max_workers <= 1:
+            for i, pose in enumerate(self.poses):
+                if self._cancel_requested:
+                    break
+                self.progress.emit(i + 1, total, f"相位解算: {pose.name}")
+                phase_ok, success, msg = self._decode_single_pose(pose)
+                if phase_ok:
+                    phase_map_count += 1
+                if success:
+                    success_count += 1
+                elif msg:
+                    failures.append(msg)
+        else:
+            # Multi-threaded concurrent execution
+            completed_count = 0
+            lock = threading.Lock()
+            self.progress.emit(0, total, f"多线程并发解算中 (并发线程数: {self.max_workers})...")
+
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_map = {
+                    executor.submit(self._decode_single_pose, pose): pose
+                    for pose in self.poses
+                }
+                for future in as_completed(future_map):
+                    if self._cancel_requested:
+                        break
+                    pose = future_map[future]
+                    try:
+                        phase_ok, success, msg = future.result()
+                    except Exception as exc:
+                        phase_ok, success, msg = False, False, f"{pose.name}: {exc}"
+
+                    with lock:
+                        completed_count += 1
+                        if phase_ok:
+                            phase_map_count += 1
+                        if success:
+                            success_count += 1
+                        elif msg:
+                            failures.append(msg)
+                        cur = completed_count
+
+                    self.progress.emit(cur, total, f"相位解算 ({cur}/{total}): {pose.name}")
 
         message = (
-            f"相位解算完成: {phase_map_count}/{total} 个姿态生成相位图，"
+            f"批量相位解算完成 (并发线程数: {self.max_workers}): "
+            f"{phase_map_count}/{total} 个姿态生成相位图，"
             f"{success_count}/{total} 个姿态获得有效DLP坐标"
         )
         if failures:
             message += "；" + "；".join(failures)
         self.finished.emit(True, message)
+
+    def stop(self):
+        self._cancel_requested = True
+        self.wait(2000)
 
     def _find_pose_frame_paths(self, pose: CalibrationPose):
         if not pose.folder_path or not os.path.isdir(pose.folder_path):

@@ -60,8 +60,19 @@ class CornerDetector:
         h, w = gray.shape[:2]
         expected_count = self.board_cols * self.board_rows
 
-        # Multi-scale attempts: scale 0.25 -> 0.20 -> 1.0 (full res)
-        scales = [0.25, 0.20, 0.50, 1.0]
+        # Adaptive multi-scale search using modern Sector-Based detector (findChessboardCornersSB).
+        # We start with downsampled scales for high speed, and gradually increase if needed.
+        # Note: We strictly avoid OpenCV's classic cv2.findChessboardCorners on large images
+        # because it enters an exponential combinatorial search loop when a chessboard is occluded/invalid,
+        # which can freeze the thread indefinitely.
+        max_dim = max(w, h)
+        if max_dim >= 3000:
+            scales = [0.25, 0.33, 0.50]
+        elif max_dim >= 1500:
+            scales = [0.50, 0.75, 1.0]
+        else:
+            scales = [1.0]
+
         found = False
         corners = None
 
@@ -73,23 +84,12 @@ class CornerDetector:
             else:
                 small_gray = gray
 
-            # 1. Try findChessboardCornersSB (Sector Based, modern & accurate)
+            # Try findChessboardCornersSB (Sector Based, modern, polynomial time, sub-pixel accurate)
             found, small_corners = cv2.findChessboardCornersSB(
                 small_gray,
                 self.pattern_size,
                 flags=cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY,
             )
-
-            # 2. Fallback to classic findChessboardCorners
-            if not found or small_corners is None:
-                flags = (
-                    cv2.CALIB_CB_ADAPTIVE_THRESH
-                    | cv2.CALIB_CB_NORMALIZE_IMAGE
-                    | cv2.CALIB_CB_FAST_CHECK
-                )
-                found, small_corners = cv2.findChessboardCorners(
-                    small_gray, self.pattern_size, flags=flags
-                )
 
             if found and small_corners is not None and len(small_corners) == expected_count:
                 # Rescale corners back to original image size
@@ -97,7 +97,8 @@ class CornerDetector:
                 break
 
         if not found or corners is None:
-            return False, None, f"未检测到完整棋盘格内角点 ({self.board_cols}x{self.board_rows})，请调整姿态、曝光或焦距"
+            # Pose has issues or no chessboard: fail immediately without hanging!
+            return False, None, f"未检测到完整棋盘格内角点 ({self.board_cols}x{self.board_rows})"
 
         # Sub-pixel refinement on original full-resolution grayscale image
         corners_f32 = corners.astype(np.float32).reshape(-1, 1, 2)
