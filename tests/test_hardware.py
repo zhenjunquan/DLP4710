@@ -38,6 +38,10 @@ class TestHardware(unittest.TestCase):
         self.assertTrue(mode_ok)
         self.assertTrue(mock_controller.pattern_ready)
         self.assertTrue(mock_controller.start_work(0))
+        self.assertTrue(mock_controller.stop_work())
+        self.assertTrue(mock_controller.is_connected, "stop_work must not disconnect the DLP")
+        self.assertFalse(mock_controller.is_projecting)
+        self.assertTrue(mock_controller.start_work(0), "DLP should be able to restart projection after stop_work")
         self.assertTrue(mock_controller.disconnect())
         self.assertFalse(mock_controller.is_connected)
         self.assertFalse(mock_controller.pattern_ready)
@@ -127,6 +131,9 @@ class TestHardware(unittest.TestCase):
             def start_work(self, repeat_num=0):
                 return True
 
+            def stop_work(self):
+                return True
+
         camera = FakeGalaxyCamera()
         dlp = FakeDlp()
 
@@ -177,6 +184,9 @@ class TestHardware(unittest.TestCase):
             exposure = 0.0
             gain = 0.0
 
+            def __init__(self):
+                self.exposure_history = []
+
             def stop_grabbing(self):
                 self.is_grabbing = False
                 return True
@@ -191,11 +201,15 @@ class TestHardware(unittest.TestCase):
 
             def set_exposure(self, value):
                 self.exposure = value
+                self.exposure_history.append(value)
                 return True
 
             def set_gain(self, value):
                 self.gain = value
                 return True
+
+            def grab_frame(self, timeout_ms=1500):
+                return True, frames[0]
 
             def grab_triggered_sequence(self, count, frame_timeout_ms=1000, overall_timeout_ms=15000):
                 return True, frames[:count]
@@ -204,6 +218,9 @@ class TestHardware(unittest.TestCase):
             last_error = ""
 
             def start_work(self, repeat_num=0):
+                return True
+
+            def stop_work(self):
                 return True
 
         camera = FakeGalaxyCamera()
@@ -215,6 +232,8 @@ class TestHardware(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0][0])
         self.assertEqual(len(results[0][1]), 12)
+        self.assertIsNotNone(worker.gray_frame)
+        self.assertEqual(camera.exposure_history, [150000.0, 12000.0])
         self.assertEqual(camera.exposure, 12000.0)
         self.assertEqual(camera.gain, 2.5)
         self.assertEqual(camera.trigger_source, "Off")

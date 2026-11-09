@@ -119,6 +119,29 @@ class TestReconstruction(unittest.TestCase):
         self.assertTrue(np.all(valid))
         np.testing.assert_allclose(vector_points, np.asarray(scalar_points), atol=1e-3)
 
+    def test_cuda_reconstruction_matches_cpu(self):
+        from dlp_common.reconstruction.cuda_reconstructor import is_cuda_available, reconstruct_points_cuda
+        if not is_cuda_available():
+            self.skipTest("CUDA not available")
+
+        self.assertTrue(self.reconstructor.load_parameters(self.calib_file))
+        camera_uv = np.array(
+            [
+                [1332.0, 1152.0],
+                [1998.0, 1152.0],
+                [2664.0, 1728.0],
+                [3330.0, 1728.0],
+            ],
+            dtype=np.float64,
+        )
+        projector_v = np.full(len(camera_uv), 162.0, dtype=np.float64)
+
+        cpu_points, cpu_valid = self.reconstructor._reconstruct_points_vectorized(camera_uv, projector_v)
+        gpu_points, gpu_valid = self.reconstructor.reconstruct_points(camera_uv, projector_v)
+
+        np.testing.assert_array_equal(cpu_valid, gpu_valid)
+        np.testing.assert_allclose(gpu_points, cpu_points, atol=1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

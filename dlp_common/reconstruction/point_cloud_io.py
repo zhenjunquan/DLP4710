@@ -114,14 +114,24 @@ def save_point_cloud_ply(
                 f.write("property uchar blue\n")
             f.write("end_header\n")
 
+            chunk_size = 50000
             if has_color:
-                for pt, clr in zip(valid_pts, valid_colors):
-                    f.write(
-                        f"{pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f} {int(clr[0])} {int(clr[1])} {int(clr[2])}\n"
-                    )
+                for i in range(0, count, chunk_size):
+                    chunk_pts = valid_pts[i : i + chunk_size]
+                    chunk_clr = valid_colors[i : i + chunk_size]
+                    lines = [
+                        f"{pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f} {int(clr[0])} {int(clr[1])} {int(clr[2])}"
+                        for pt, clr in zip(chunk_pts, chunk_clr)
+                    ]
+                    f.write("\n".join(lines) + "\n")
             else:
-                for pt in valid_pts:
-                    f.write(f"{pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f}\n")
+                for i in range(0, count, chunk_size):
+                    chunk_pts = valid_pts[i : i + chunk_size]
+                    lines = [
+                        f"{pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f}"
+                        for pt in chunk_pts
+                    ]
+                    f.write("\n".join(lines) + "\n")
 
         return True, count, f"成功导出 {count} 个点到 {file_path}"
     except Exception as e:
@@ -143,9 +153,15 @@ def save_point_cloud_txt(
         return False, 0, "点云数据为空，未导出"
 
     try:
+        chunk_size = 50000
         with open(file_path, "w", encoding="ascii") as f:
-            for pt in valid_pts:
-                f.write(f"{pt[0]:.6f}\t{pt[1]:.6f}\t{pt[2]:.6f}\n")
+            for i in range(0, count, chunk_size):
+                chunk_pts = valid_pts[i : i + chunk_size]
+                lines = [
+                    f"{pt[0]:.6f}\t{pt[1]:.6f}\t{pt[2]:.6f}"
+                    for pt in chunk_pts
+                ]
+                f.write("\n".join(lines) + "\n")
         return True, count, f"成功导出 {count} 个点到 {file_path}"
     except Exception as e:
         return False, 0, f"保存TXT文件异常: {e}"

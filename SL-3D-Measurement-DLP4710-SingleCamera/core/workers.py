@@ -4,6 +4,7 @@ Asynchronous workers for live camera preview and 3D measurement reconstruction.
 
 import time
 from typing import Dict, List, Optional, Tuple
+import cv2
 import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
@@ -37,10 +38,11 @@ class LivePreviewWorker(QThread):
 
 
 class CaptureMeasurementWorker(QThread):
-    """Capture the 12-frame measurement sequence without blocking the UI."""
+    """Capture base gray frame and the 12-frame measurement sequence without blocking the UI."""
 
     progress = pyqtSignal(int, str)
     completed = pyqtSignal(bool, object, str)
+    gray_frame_captured = pyqtSignal(np.ndarray)
 
     def __init__(
         self,
@@ -48,12 +50,15 @@ class CaptureMeasurementWorker(QThread):
         dlp: DLP4710Controller,
         exposure_us: float,
         gain_db: float,
+        gray_exposure_us: float = 150000.0,
     ):
         super().__init__()
         self.camera = camera
         self.dlp = dlp
         self.exposure_us = exposure_us
         self.gain_db = gain_db
+        self.gray_exposure_us = gray_exposure_us
+        self.gray_frame: Optional[np.ndarray] = None
 
     def _require(self, ok: bool, fallback: str):
         if not ok:
@@ -63,34 +68,75 @@ class CaptureMeasurementWorker(QThread):
         frames = []
         message = ""
         try:
-            self.progress.emit(10, "正在配置大恒相机测量参数...")
+            # 1. 首先先采集曝光为设置曝光时间的相机灰度图
+            self.progress.emit(5, f"正在采集基准灰度图 (曝光 {int(self.gray_exposure_us)} μs)...")
             self.camera.stop_grabbing()
             self._require(self.camera.set_trigger_mode(False), "关闭相机触发模式失败")
-            self._require(self.camera.set_exposure(self.exposure_us), "设置相机曝光失败")
+            self._require(self.camera.set_exposure(self.gray_exposure_us), "设置灰度图曝光失败")
             self._require(self.camera.set_gain(self.gain_db), "设置相机增益失败")
+            self._require(
+                self.camera.set_trigger_mode(True, source="Software"),
+                "设置相机软触发失败",
+            )
+            self._require(self.camera.start_grabbing(), "启动灰度图采集流失败")
+
+            self.msleep(50)
+            if hasattr(self.camera, "grab_frame"):
+                ok_gray, gray_frame = self.camera.grab_frame(timeout_ms=3000)
+                if not ok_gray or gray_frame is None:
+                    raise RuntimeError(self.camera.last_error or "采集基准灰度图失败")
+            else:
+                gray_frame = np.zeros((48, 64), dtype=np.uint8)
+
+            if gray_frame.ndim == 3:
+                gray_frame = cv2.cvtColor(gray_frame, cv2.COLOR_BGR2GRAY)
+
+            self.gray_frame = gray_frame
+            self.gray_frame_captured.emit(gray_frame)
+            self.progress.emit(25, "基准灰度图采集完成，正在配置12帧条纹投影...")
+
+            # 2. 然后执行设置曝光时间的 投影采集12帧
+            self.camera.stop_grabbing()
+            self._require(self.camera.set_trigger_mode(False), "关闭相机触发模式失败")
+            self._require(self.camera.set_exposure(self.exposure_us), "设置条纹投影曝光失败")
+            self._require(self.camera.set_gain(self.gain_db), "设置相机增益失败")
+            self.progress.emit(35, f"等待投影曝光稳定 ({int(self.exposure_us)} μs)...")
+            self.msleep(150)
+
             self._require(
                 self.camera.set_trigger_mode(True, source="Line2"),
                 "设置Line2硬触发失败",
             )
             self._require(self.camera.start_grabbing(), "启动大恒相机采集流失败")
 
-            self.msleep(20)
-            self.progress.emit(30, "正在启动DLP并等待12帧硬触发图像...")
+            if hasattr(self.camera, "flush_buffer"):
+                self.camera.flush_buffer()
+
+            self.msleep(30)
+            self.progress.emit(50, "正在启动DLP并等待12帧硬触发图像...")
             if not self.dlp.start_work(0):
                 raise RuntimeError(self.dlp.last_error or "DLP启动失败")
 
             ok, frames = self.camera.grab_triggered_sequence(
                 12,
-                frame_timeout_ms=1000,
+                frame_timeout_ms=1500,
                 overall_timeout_ms=15000,
             )
             if not ok or len(frames) != 12:
+                # 异常时若条纹序列被打断，重置模式以便下次采集
+                if hasattr(self.dlp, "prepare_pattern_mode"):
+                    try:
+                        self.dlp.prepare_pattern_mode()
+                    except Exception:
+                        pass
                 raise RuntimeError(f"硬触发图像不足12张，实际收到 {len(frames)} 张")
             self.progress.emit(100, "12帧条纹采集完成")
-            message = "成功采集12帧硬触发条纹图像"
+            message = "成功采集基准灰度图与12帧硬触发条纹图像"
         except Exception as exc:
             message = f"在线采集失败: {exc}"
         finally:
+            # 原版C++参考设计：正常结束严禁调用 stop_work()，DLP单次序列自然结束，
+            # 保持I2C总线和Pattern模式就绪，供下一次采集直接触发。
             try:
                 self.camera.stop_grabbing()
                 self.camera.set_trigger_mode(False)
@@ -133,6 +179,7 @@ class MeasureWorker(QThread):
         roi: Optional[Tuple[int, int, int, int]] = None,
         sample_step: int = 4,
         min_modulation: float = 5.0,
+        gray_frame: Optional[np.ndarray] = None,
     ):
         super().__init__()
         self.reconstructor = reconstructor
@@ -141,6 +188,7 @@ class MeasureWorker(QThread):
         self.roi = roi
         self.sample_step = sample_step
         self.min_modulation = min_modulation
+        self.gray_frame = gray_frame
 
     def run(self):
         start_time = time.time()
@@ -173,9 +221,11 @@ class MeasureWorker(QThread):
             valid_pts, _ = extract_valid_points(xyz_map)
             elapsed = time.time() - start_time
 
+            raw_frame = self.gray_frame if self.gray_frame is not None else self.frames[0]
             result = {
                 "frames": list(self.frames),
-                "raw_frame": self.frames[0],
+                "raw_frame": raw_frame,
+                "gray_frame": self.gray_frame,
                 "wrapped_phases": wrapped_list,
                 "wrapped_phase": wrapped_list[0],
                 "unwrapped_phase": unwrapped_phase,

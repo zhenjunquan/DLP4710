@@ -259,6 +259,12 @@ class DahengCameraDriver:
 
         if self._cam is not None:
             try:
+                # 增大流通道缓冲区数量（默认仅1~2帧），避免高速硬件触发连续多帧时由于缓冲区溢出丢帧
+                if hasattr(self._cam, "data_stream") and len(self._cam.data_stream) > 0:
+                    try:
+                        self._cam.data_stream[0].set_acquisition_buffer_number(32)
+                    except Exception:
+                        pass
                 self._cam.stream_on()
                 self._is_grabbing = True
                 return True
@@ -404,6 +410,18 @@ class DahengCameraDriver:
         self._last_error = "大恒相机未返回有效图像"
         return False, None
 
+    def flush_buffer(self) -> bool:
+        """Flushes the stream queue to clear any pending or stale frames."""
+        if self._cam is not None and self._is_gx_opened:
+            try:
+                if hasattr(self._cam, "data_stream") and len(self._cam.data_stream) > 0:
+                    self._cam.data_stream[0].flush_queue()
+                    return True
+            except Exception as e:
+                self._last_error = f"清空相机缓冲区失败: {e}"
+                return False
+        return True
+
     def grab_sequence(self, count: int, timeout_ms: int = 5000) -> Tuple[bool, List[np.ndarray]]:
         """
         Synchronously captures a sequence of frames.
@@ -426,6 +444,7 @@ class DahengCameraDriver:
         retain_frames: bool = True,
     ) -> Tuple[bool, List[np.ndarray]]:
         """Collect a hardware-triggered sequence while tolerating temporary timeouts."""
+        self.flush_buffer()
         frames: List[np.ndarray] = []
         deadline = time.monotonic() + max(1, overall_timeout_ms) / 1000.0
         empty_timeouts = 0
@@ -438,6 +457,7 @@ class DahengCameraDriver:
                 if retain_frames:
                     frames.append(frame)
                 received_count += 1
+                empty_timeouts = 0
             else:
                 empty_timeouts += 1
                 if received_count == 0 and empty_timeouts >= 5:

@@ -15,6 +15,11 @@ from ..calibration.telecentric_camera import (
     project_telecentric_point,
     undistort_telecentric_pixel,
 )
+from .cuda_reconstructor import (
+    get_cuda_device_name,
+    is_cuda_available,
+    reconstruct_points_cuda,
+)
 
 
 class MonoSLReconstructor:
@@ -25,7 +30,8 @@ class MonoSLReconstructor:
         projector_v = (phase / reference_cycle_count) * projector_height
     """
 
-    def __init__(self):
+    def __init__(self, enable_gpu: bool = True):
+        self.enable_gpu: bool = enable_gpu
         self.projector_matrix: Optional[np.ndarray] = None
         self.projector_dist_14: Optional[np.ndarray] = None
         self.telecentric_projection: Optional[np.ndarray] = None
@@ -427,6 +433,7 @@ class MonoSLReconstructor:
 
         proj_h = float(self.projector_image_size[1])
         ref_cycles = self.reference_cycle_count
+        use_gpu = False
 
         # Keep the scalar path for small inputs and test overrides. Large camera
         # frames use chunked NumPy reconstruction to avoid millions of Python calls.
@@ -448,7 +455,8 @@ class MonoSLReconstructor:
                 if progress_callback is not None:
                     progress_callback((oi + 1) / max(1, out_rows))
         else:
-            chunk_rows = 64
+            use_gpu = self.enable_gpu and is_cuda_available()
+            chunk_rows = 256 if use_gpu else 64
             source_x = x_indices if full_size_input else x_indices - rx
             for row_start in range(0, out_rows, chunk_rows):
                 row_end = min(out_rows, row_start + chunk_rows)
@@ -464,7 +472,7 @@ class MonoSLReconstructor:
                     grid_x, grid_y = np.meshgrid(x_indices, ys)
                     camera_uv = np.column_stack((grid_x.ravel()[flat_valid], grid_y.ravel()[flat_valid]))
                     projector_v = phase_chunk.ravel()[flat_valid] / ref_cycles * proj_h
-                    points, point_valid = self._reconstruct_points_vectorized(camera_uv, projector_v)
+                    points, point_valid = self.reconstruct_points(camera_uv, projector_v)
 
                     chunk_xyz = np.zeros((row_end - row_start, out_cols, 3), dtype=np.float64)
                     valid_positions = np.flatnonzero(flat_valid)
@@ -478,7 +486,41 @@ class MonoSLReconstructor:
         if valid_count == 0:
             return False, None, "没有重建出有效三维点，请检查水平条纹相位范围和标定文件"
 
-        return True, xyz_map, f"成功重建 {valid_count} 个三维点"
+        gpu_info = f" (GPU加速: {get_cuda_device_name()})" if (use_gpu and get_cuda_device_name()) else ""
+        return True, xyz_map, f"成功重建 {valid_count} 个三维点{gpu_info}"
+
+    def reconstruct_points(
+        self,
+        camera_uv: np.ndarray,
+        projector_v: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Reconstructs 3D points from camera pixel coordinates and projector row coordinates.
+        Automatically uses GPU (CUDA) if available and enabled, otherwise falls back
+        to CPU vectorization.
+        """
+        if self.enable_gpu and is_cuda_available():
+            try:
+                return reconstruct_points_cuda(
+                    camera_uv,
+                    projector_v,
+                    self.telecentric_projection,
+                    self.telecentric_dist_5,
+                    self.camera_image_size,
+                    self.camera_pseudo_col_u,
+                    self.camera_pseudo_col_v,
+                    self.camera_line_direction,
+                    self.projector_matrix,
+                    self.projector_dist_14,
+                    self.projector_tilt_matrix,
+                    self.projector_image_size,
+                    self.projector_row_plane_normals,
+                    self.min_projector_z,
+                    self.max_projector_z,
+                )
+            except Exception:
+                pass
+        return self._reconstruct_points_vectorized(camera_uv, projector_v)
 
     def _reconstruct_points_vectorized(
         self,

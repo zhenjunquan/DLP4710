@@ -272,6 +272,11 @@ class MeasurementController:
             self._save_float_result(auxiliary_dir, "modulation", result["modulation"])
             mask = (np.asarray(result["mask"]) > 0).astype(np.uint8) * 255
             self._write_image(os.path.join(auxiliary_dir, "mask.png"), mask)
+            if result.get("gray_frame") is not None:
+                self._write_image(
+                    os.path.join(auxiliary_dir, "gray_frame.bmp"),
+                    np.asarray(result["gray_frame"]),
+                )
 
             def save_cloud_pair(prefix: str, xyz_values: np.ndarray) -> int:
                 ply_path = os.path.join(point_cloud_dir, f"{prefix}_cloud.ply")

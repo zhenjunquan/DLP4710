@@ -86,6 +86,10 @@ class DLP4710Controller:
             self._is_mock = True
 
     @property
+    def is_projecting(self) -> bool:
+        return self._is_projecting
+
+    @property
     def is_connected(self) -> bool:
         return self._is_connected
 
@@ -163,17 +167,22 @@ class DLP4710Controller:
 
     def prepare_pattern_mode(self) -> Tuple[bool, str]:
         """Load the pattern order already stored in Flash and enter internal mode."""
-        if not self._is_connected and not self.connect():
-            return False, self._last_error or "DLP尚未连接"
-
         if self._is_mock:
             self._pattern_ready = True
             return True, "模拟DLP条纹模式已就绪"
 
         try:
+            # 确保获取 Cypress I2C 总线控制权
+            if hasattr(self._dll, "dlpConnect"):
+                ok = bool(self._dll.dlpConnect())
+                self._is_connected = ok
+                if not ok:
+                    self._last_error = "DLP连接/重新获取I2C总线失败"
+                    return False, self._last_error
             self._dll.setTriggerOut2()
             self._dll.loadPatternOrderTableEntryfromFlash()
             self._dll.writeInternalOperatingMode()
+            self._is_connected = True
             self._pattern_ready = True
             self._last_error = ""
             return True, "DLP已加载Flash条纹序列并进入内部投影模式"
@@ -184,18 +193,17 @@ class DLP4710Controller:
 
     def start_work(self, repeat_num: int = 0) -> bool:
         """
-        Starts pattern projection. repeat_num = 0 for continuous/infinite repeat.
+        Starts pattern projection. repeat_num = 0 for single-shot (natural end at sequence end).
         """
         if self._is_mock:
             self._is_projecting = True
             return True
 
-        if not self._is_connected:
-            self._last_error = "DLP尚未连接，不能启动投影"
-            return False
-        if not self._pattern_ready:
-            self._last_error = "DLP条纹序列尚未就绪，请先烧录24帧标定BIN"
-            return False
+        if not self._is_connected or not self._pattern_ready:
+            ok, msg = self.prepare_pattern_mode()
+            if not ok:
+                self._last_error = f"DLP尚未就绪，无法启动投影: {msg}"
+                return False
 
         try:
             repeat_value = ctypes.c_uint8(repeat_num)
@@ -211,16 +219,17 @@ class DLP4710Controller:
     def stop_work(self) -> bool:
         """
         Stops pattern projection.
+        注意：DLP底层DLL执行 stopWork() 会释放 Cypress I2C 总线，
+        因此正常测量周期结束后绝不要调用此方法；如调用，需重设 pattern_ready = False。
         """
         if self._is_mock:
             self._is_projecting = False
-            self._is_connected = False
             return True
 
         try:
             ok = bool(self._dll.stopWork())
             self._is_projecting = False
-            self._is_connected = False
+            self._pattern_ready = False
             return ok
         except Exception as e:
             self._last_error = f"停止DLP投影异常: {e}"

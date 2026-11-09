@@ -137,23 +137,32 @@ class MeasurementMainWindow(QMainWindow):
         left_layout.addWidget(grp_calib)
 
         # 2. Camera & Preview Group
-        grp_camera = QGroupBox("2. 相机与实时预览")
+        grp_camera = QGroupBox("2. 相机与曝光设置")
         lay_cam = QGridLayout(grp_camera)
 
-        lay_cam.addWidget(QLabel("曝光时间 (μs):"), 0, 0)
+        lay_cam.addWidget(QLabel("基准灰度曝光 (μs):"), 0, 0)
+        self.spin_gray_exposure = QDoubleSpinBox()
+        self.spin_gray_exposure.setRange(100.0, 1000000.0)
+        self.spin_gray_exposure.setSingleStep(1000.0)
+        self.spin_gray_exposure.setValue(getattr(self.controller.config, "board_exposure_us", 150000.0))
+        lay_cam.addWidget(self.spin_gray_exposure, 0, 1)
+
+        lay_cam.addWidget(QLabel("条纹投影曝光 (μs):"), 1, 0)
         self.spin_exposure = QDoubleSpinBox()
         self.spin_exposure.setRange(100.0, 1000000.0)
-        self.spin_exposure.setValue(self.controller.config.default_exposure_us)
-        lay_cam.addWidget(self.spin_exposure, 0, 1)
+        self.spin_exposure.setSingleStep(500.0)
+        pattern_default = getattr(self.controller.config, "calibration_pattern_exposure_us", 3000.0)
+        self.spin_exposure.setValue(pattern_default)
+        lay_cam.addWidget(self.spin_exposure, 1, 1)
 
-        lay_cam.addWidget(QLabel("增益 (dB):"), 1, 0)
+        lay_cam.addWidget(QLabel("增益 (dB):"), 2, 0)
         self.spin_gain = QDoubleSpinBox()
         self.spin_gain.setRange(0.0, 24.0)
         self.spin_gain.setValue(self.controller.config.default_gain_db)
-        lay_cam.addWidget(self.spin_gain, 1, 1)
+        lay_cam.addWidget(self.spin_gain, 2, 1)
 
         self.btn_toggle_preview = QPushButton("开启实时预览")
-        lay_cam.addWidget(self.btn_toggle_preview, 2, 0, 1, 2)
+        lay_cam.addWidget(self.btn_toggle_preview, 3, 0, 1, 2)
         left_layout.addWidget(grp_camera)
 
         # 3. Measurement Execution Group
@@ -491,17 +500,24 @@ class MeasurementMainWindow(QMainWindow):
             dlp=self.controller.dlp,
             exposure_us=self.spin_exposure.value(),
             gain_db=self.spin_gain.value(),
+            gray_exposure_us=self.spin_gray_exposure.value(),
         )
         self.capture_worker.progress.connect(self._on_capture_progress)
         self.capture_worker.completed.connect(self._on_capture_completed)
+        self.capture_worker.gray_frame_captured.connect(self._on_gray_frame_captured)
         self.capture_worker.finished.connect(self._on_capture_thread_stopped)
         self.capture_worker.start()
+
+    def _on_gray_frame_captured(self, gray_frame: np.ndarray):
+        self.view_2d.update_views(raw_frame=gray_frame)
+        self.log(f"已采集基准灰度图 (曝光 {int(self.spin_gray_exposure.value())} μs)")
 
     def _set_measure_controls_enabled(self, enabled: bool):
         for widget in (
             self.btn_toggle_preview,
             self.btn_measure_online,
             self.btn_measure_offline,
+            self.spin_gray_exposure,
             self.spin_exposure,
             self.spin_gain,
             self.btn_detect_devices,
@@ -525,7 +541,8 @@ class MeasurementMainWindow(QMainWindow):
             self._set_measure_controls_enabled(True)
             QMessageBox.critical(self, "采集错误", message)
             return
-        self._start_reconstruction(frames)
+        gray_frame = getattr(self.capture_worker, "gray_frame", None)
+        self._start_reconstruction(frames, gray_frame=gray_frame)
 
     def _on_capture_thread_stopped(self):
         worker = self.capture_worker
@@ -550,7 +567,11 @@ class MeasurementMainWindow(QMainWindow):
         self.log(msg)
         self._start_reconstruction(frames)
 
-    def _start_reconstruction(self, frames: List[np.ndarray]):
+    def _start_reconstruction(
+        self,
+        frames: List[np.ndarray],
+        gray_frame: Optional[np.ndarray] = None,
+    ):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(10)
         self.lbl_status.setText("开始三维点云重构计算...")
@@ -564,6 +585,7 @@ class MeasurementMainWindow(QMainWindow):
             frames=frames,
             sample_step=step,
             min_modulation=min_mod,
+            gray_frame=gray_frame,
         )
         self.measure_worker.progress.connect(lambda p, m: (
             self.progress_bar.setValue(p),
