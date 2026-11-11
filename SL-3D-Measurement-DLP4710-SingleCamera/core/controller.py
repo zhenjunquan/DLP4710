@@ -2,6 +2,7 @@
 Controller managing hardware, calibration parameters, and measurement pipeline.
 """
 
+import json
 import os
 import shutil
 from datetime import datetime
@@ -93,6 +94,46 @@ class MeasurementController:
 
         return True, frames, f"成功载入12张条纹图像: {folder_path}"
 
+    def load_offline_multi_exposure_frames(
+        self, folder_path: str
+    ) -> Tuple[bool, List[List[np.ndarray]], str]:
+        """
+        Loads multi-exposure fringe sequences from a folder structure.
+        Supports:
+          - Subdirectories bracket_1, bracket_2, ... or exp_1, exp_2, ... each containing 12 BMPs.
+          - 01_fringes/ containing bracket subdirectories.
+          - Fallback to a single directory with 12 BMPs as a 1-bracket sequence.
+        """
+        if not os.path.isdir(folder_path):
+            return False, [], f"目录不存在: {folder_path}"
+
+        search_root = folder_path
+        fringe_sub = os.path.join(folder_path, "01_fringes")
+        if os.path.isdir(fringe_sub):
+            search_root = fringe_sub
+
+        subdirs = [
+            os.path.join(search_root, d)
+            for d in sorted(os.listdir(search_root))
+            if os.path.isdir(os.path.join(search_root, d))
+        ]
+
+        brackets = []
+        for sdir in subdirs:
+            ok, frames, _ = self.load_offline_frames(sdir)
+            if ok and len(frames) == 12:
+                brackets.append(frames)
+
+        if len(brackets) >= 2:
+            return True, brackets, f"成功载入 {len(brackets)} 档多曝光条纹序列 (共 {len(brackets) * 12} 帧)"
+
+        # Fallback to single 12-frame folder
+        ok, frames, msg = self.load_offline_frames(folder_path)
+        if ok and len(frames) == 12:
+            return True, [frames], f"成功载入单档条纹序列 (12帧): {folder_path}"
+
+        return False, [], f"未在目录或子目录中找到多曝光条纹序列 (每档需12张条纹图像): {folder_path}"
+
     def disconnect_devices(self) -> Tuple[bool, str]:
         """Release the Daheng camera and stop/disconnect the DLP controller."""
         camera_was_open = self.camera.is_opened
@@ -157,12 +198,12 @@ class MeasurementController:
         result["point_cloud_processed"] = False
         return True, f"已恢复原始点云，共 {len(original_points):,} 点"
 
-    def save_ply(self, file_path: str) -> Tuple[bool, str]:
+    def save_ply(self, file_path: str, binary: bool = True) -> Tuple[bool, str]:
         if self.latest_result is None or "xyz_map" not in self.latest_result:
             return False, "当前尚无测量结果，无法导出"
 
         xyz_map = self.latest_result["xyz_map"]
-        ok, count, msg = save_point_cloud_ply(file_path, xyz_map)
+        ok, count, msg = save_point_cloud_ply(file_path, xyz_map, binary=binary)
         return ok, msg
 
     def save_txt(self, file_path: str) -> Tuple[bool, str]:
@@ -206,26 +247,20 @@ class MeasurementController:
         )
 
     def save_intermediate_results(self, output_folder: str) -> Tuple[bool, str]:
-        """Save the complete measurement package, including PLY and TXT clouds."""
+        """
+        Fast export of measurement data:
+        Only saves raw captured fringes (BMP), optional gray frame (BMP),
+        complete capture parameters (JSON + TXT), and the final raw point cloud (Binary PLY).
+        Skips all intermediate wrapped/unwrapped phase/modulation files and duplicate TXT points.
+        """
         result = self.latest_result
         if result is None:
-            return False, "当前尚无测量结果，无法保存中间结果"
+            return False, "当前尚无测量结果，无法保存数据"
 
-        required = (
-            "frames",
-            "wrapped_phases",
-            "unwrapped_phase",
-            "modulation",
-            "mask",
-            "xyz_map",
-        )
-        missing = [key for key in required if key not in result]
-        if missing:
-            return False, f"当前测量结果不完整，缺少: {', '.join(missing)}"
+        if "frames" not in result or "xyz_map" not in result:
+            return False, "当前测量结果不完整，缺少原始条纹或点云数据"
         if len(result["frames"]) != 12:
             return False, f"条纹图像应为12帧，当前为 {len(result['frames'])} 帧"
-        if len(result["wrapped_phases"]) != 3:
-            return False, f"包裹相位应为3组，当前为 {len(result['wrapped_phases'])} 组"
         if os.path.exists(output_folder):
             return False, f"目标文件夹已存在，请使用新的文件夹名称: {output_folder}"
 
@@ -238,99 +273,135 @@ class MeasurementController:
             os.mkdir(output_folder)
             created = True
             fringe_dir = os.path.join(output_folder, "01_fringes")
-            wrapped_dir = os.path.join(output_folder, "02_wrapped_phase")
-            unwrapped_dir = os.path.join(output_folder, "03_unwrapped_phase")
-            auxiliary_dir = os.path.join(output_folder, "04_auxiliary")
-            point_cloud_dir = os.path.join(output_folder, "05_point_cloud")
-            for folder in (
-                fringe_dir,
-                wrapped_dir,
-                unwrapped_dir,
-                auxiliary_dir,
-                point_cloud_dir,
-            ):
-                os.mkdir(folder)
+            point_cloud_dir = os.path.join(output_folder, "02_point_cloud")
+            os.mkdir(fringe_dir)
+            os.mkdir(point_cloud_dir)
 
+            # 1. Save raw fringe frames (BMP, uncompressed for fastest disk I/O)
             for index, frame in enumerate(result["frames"], start=1):
                 self._write_image(
                     os.path.join(fringe_dir, f"H_Fringe_{index}.bmp"),
                     np.asarray(frame),
                 )
 
-            for index, phase in enumerate(result["wrapped_phases"], start=1):
-                self._save_float_result(
-                    wrapped_dir,
-                    f"wrapped_frequency_{index:02d}",
-                    phase,
-                )
+            # If multi-exposure, save all individual bracket fringe sequences
+            if result.get("is_multi_exposure") and "brackets_frames" in result:
+                for b_idx, b_frames in enumerate(result["brackets_frames"], start=1):
+                    b_fringe_dir = os.path.join(fringe_dir, f"bracket_{b_idx}")
+                    os.mkdir(b_fringe_dir)
+                    for f_idx, f_img in enumerate(b_frames, start=1):
+                        self._write_image(
+                            os.path.join(b_fringe_dir, f"H_Fringe_{f_idx}.bmp"),
+                            np.asarray(f_img),
+                        )
 
-            self._save_float_result(
-                unwrapped_dir,
-                "unwrapped_phase",
-                result["unwrapped_phase"],
-            )
-            self._save_float_result(auxiliary_dir, "modulation", result["modulation"])
-            mask = (np.asarray(result["mask"]) > 0).astype(np.uint8) * 255
-            self._write_image(os.path.join(auxiliary_dir, "mask.png"), mask)
+            # 2. Save gray frame if present
             if result.get("gray_frame") is not None:
                 self._write_image(
-                    os.path.join(auxiliary_dir, "gray_frame.bmp"),
+                    os.path.join(output_folder, "gray_frame.bmp"),
                     np.asarray(result["gray_frame"]),
                 )
 
-            def save_cloud_pair(prefix: str, xyz_values: np.ndarray) -> int:
-                ply_path = os.path.join(point_cloud_dir, f"{prefix}_cloud.ply")
-                ply_ok, ply_count, ply_message = save_point_cloud_ply(
-                    ply_path,
-                    xyz_values,
-                )
-                if not ply_ok:
-                    raise OSError(ply_message)
-
-                txt_path = os.path.join(point_cloud_dir, f"{prefix}_points.txt")
-                txt_ok, txt_count, txt_message = save_point_cloud_txt(
-                    txt_path,
-                    xyz_values,
-                )
-                if not txt_ok:
-                    raise OSError(txt_message)
-                if txt_count != ply_count:
-                    raise OSError(
-                        f"{prefix}点云PLY与TXT点数不一致: "
-                        f"PLY={ply_count}, TXT={txt_count}"
-                    )
-                return ply_count
-
+            # 3. Save final raw point cloud in high-speed Binary PLY format
             original_xyz = result.get("original_xyz_map", result["xyz_map"])
-            original_count = save_cloud_pair("original", original_xyz)
-            processed_count = save_cloud_pair("processed", result["xyz_map"])
+            ply_path = os.path.join(point_cloud_dir, "original_cloud.ply")
+            ply_ok, ply_count, ply_message = save_point_cloud_ply(
+                ply_path,
+                original_xyz,
+                binary=True,
+            )
+            if not ply_ok:
+                raise OSError(ply_message)
 
+            # If user processed cloud (e.g. extracted subject), also save processed_cloud.ply
+            if result.get("point_cloud_processed"):
+                proc_ply_path = os.path.join(point_cloud_dir, "processed_cloud.ply")
+                save_point_cloud_ply(proc_ply_path, result["xyz_map"], binary=True)
+
+            # 4. Save structured capture & measurement parameters JSON
+            valid_pts, _ = extract_valid_points(original_xyz)
+            bounds = {}
+            if len(valid_pts) > 0:
+                min_pt = np.min(valid_pts, axis=0)
+                max_pt = np.max(valid_pts, axis=0)
+                extent = max_pt - min_pt
+                bounds = {
+                    "min_x": float(min_pt[0]), "max_x": float(max_pt[0]), "extent_x": float(extent[0]),
+                    "min_y": float(min_pt[1]), "max_y": float(max_pt[1]), "extent_y": float(extent[1]),
+                    "min_z": float(min_pt[2]), "max_z": float(max_pt[2]), "extent_z": float(extent[2]),
+                }
+
+            params_data = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "measurement_mode": "多曝光 (HDR) 融合测量" if result.get("is_multi_exposure") else "单曝光标准测量",
+                "calibration_file": self.calib_file_path or "未记录",
+                "point_cloud": {
+                    "total_points": ply_count,
+                    "reconstruction_elapsed_seconds": float(result.get("elapsed_seconds", 0.0)),
+                    "bounds_mm": bounds,
+                    "format": "binary_little_endian 1.0 (PLY)",
+                    "file_path": "02_point_cloud/original_cloud.ply",
+                },
+                "camera": {
+                    "exposure_us": float(getattr(self.config, "calibration_pattern_exposure_us", 3000.0)),
+                    "gain_db": float(getattr(self.config, "default_gain_db", 0.0)),
+                    "gray_exposure_us": float(getattr(self.config, "board_exposure_us", 150000.0)),
+                },
+                "dlp": {
+                    "brightness_percent": float(self.dlp.brightness_percent),
+                    "color_mode": self.dlp.color_mode,
+                    "led_currents": list(self.dlp.led_currents),
+                    "led_enables": self.dlp.led_enables,
+                    "control_method": "manual" if self.dlp.led_control_method == 0 else "auto",
+                },
+            }
+            if result.get("is_multi_exposure"):
+                params_data["multi_exposure"] = {
+                    "bracket_count": len(result.get("brackets_frames", [])),
+                    "brackets_info": result.get("brackets_info", []),
+                    "bracket_distribution": result.get("bracket_counts", {}),
+                }
+
+            with open(os.path.join(output_folder, "capture_parameters.json"), "w", encoding="utf-8") as jf:
+                json.dump(params_data, jf, ensure_ascii=False, indent=2)
+
+            # 5. Human-readable measurement_info.txt
             info_lines = [
-                "DLP4710 单目结构光完整测量结果",
-                f"保存时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                f"条纹帧数: {len(result['frames'])}",
-                f"包裹相位组数: {len(result['wrapped_phases'])}",
-                f"点云状态: {'已提取测量主体' if result.get('point_cloud_processed') else '尚未处理，处理后点云与原始点云相同'}",
-                f"原始点云有效点数: {original_count}",
-                f"处理后点云有效点数: {processed_count}",
-                f"重构耗时: {float(result.get('elapsed_seconds', 0.0)):.3f} 秒",
+                "DLP4710 单目结构光三维测量数据",
+                f"保存时间: {params_data['timestamp']}",
+                f"测量模式: {params_data['measurement_mode']}",
+                f"条纹帧数: {len(result['frames'])} 帧",
+                f"有效三维点数: {ply_count:,} 点",
+                f"重构算法耗时: {float(result.get('elapsed_seconds', 0.0)):.3f} 秒",
                 f"标定文件: {self.calib_file_path or '未记录'}",
-                "原始点云: 05_point_cloud/original_cloud.ply",
-                "原始坐标: 05_point_cloud/original_points.txt",
-                "处理后点云: 05_point_cloud/processed_cloud.ply",
-                "处理后坐标: 05_point_cloud/processed_points.txt",
-                "说明: NPY为原始浮点数值，TIFF为浮点图，PNG为归一化伪彩预览。",
+                f"点云格式: 二进制 PLY (高速格式，可用 MeshLab / CloudCompare 打开或一键转 TXT)",
+                f"点云路径: 02_point_cloud/original_cloud.ply",
+                f"条纹路径: 01_fringes/ (H_Fringe_01.bmp ~ H_Fringe_12.bmp)",
             ]
+            if bounds:
+                info_lines.append(f"点云跨度: X={bounds['extent_x']:.2f} mm, Y={bounds['extent_y']:.2f} mm, Z={bounds['extent_z']:.2f} mm")
+            if result.get("gray_frame") is not None:
+                info_lines.append("灰度图像: gray_frame.bmp")
+            if result.get("is_multi_exposure"):
+                num_b = len(result.get("brackets_frames", []))
+                info_lines.append(f"多曝光档位数: {num_b}")
+                if "bracket_counts" in result:
+                    info_lines.append("各曝光档位贡献点数:")
+                    tot_pts = sum(result["bracket_counts"].values()) or 1
+                    for b_i, cnt in result["bracket_counts"].items():
+                        info_lines.append(f"  - 档位 {b_i + 1}: {cnt:,} 点 ({cnt * 100.0 / tot_pts:.1f}%)")
+
             with open(
                 os.path.join(output_folder, "measurement_info.txt"),
                 "w",
                 encoding="utf-8",
             ) as info_file:
                 info_file.write("\n".join(info_lines) + "\n")
+
         except Exception as exc:
             if created:
                 shutil.rmtree(output_folder, ignore_errors=True)
-            return False, f"保存中间结果失败: {exc}"
+            return False, f"保存测量数据失败: {exc}"
 
-        return True, f"完整结果（含原始/处理后PLY和TXT点云）已保存到: {output_folder}"
+        return True, f"测量数据已极速保存 (含条纹/灰度/参数/二进制PLY点云): {output_folder}"
 

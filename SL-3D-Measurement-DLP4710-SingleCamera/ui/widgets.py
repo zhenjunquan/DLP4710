@@ -82,30 +82,45 @@ class ScaledImageLabel(QLabel):
             self.setPixmap(scaled)
 
 
-class MultiImageViewerWidget(QWidget):
+class MultiImageViewerWidget(QTabWidget):
     """
-    Displays 2x2 grid or tabbed view of 2D process images:
-    1. Raw Frame
-    2. Wrapped Phase
-    3. Unwrapped Absolute Phase
-    4. Modulation / Background Mask
+    Displays 2D process images across tabs:
+    - Tab 1: 2x2 grid (Raw/Fused frame, Wrapped phase, Unwrapped phase, Modulation mask)
+    - Tab 2: HDR multi-exposure analysis (Fused HDR fringe & Exposure bracket index heatmap)
     """
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        layout = QGridLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
 
-        self.view_raw = ScaledImageLabel("原始条纹帧 (Raw Frame)")
+        # Tab 1: Standard 2x2 process views
+        tab_grid = QWidget()
+        grid_layout = QGridLayout(tab_grid)
+        grid_layout.setContentsMargins(6, 6, 6, 6)
+        grid_layout.setSpacing(6)
+
+        self.view_raw = ScaledImageLabel("原始/融合条纹帧 (Fringe Frame)")
         self.view_wrapped = ScaledImageLabel("包裹相位 (Wrapped Phase)")
         self.view_unwrapped = ScaledImageLabel("绝对展开相位 (Unwrapped Phase)")
         self.view_mask = ScaledImageLabel("调制与有效掩膜 (Modulation Mask)")
 
-        layout.addWidget(self.view_raw, 0, 0)
-        layout.addWidget(self.view_wrapped, 0, 1)
-        layout.addWidget(self.view_unwrapped, 1, 0)
-        layout.addWidget(self.view_mask, 1, 1)
+        grid_layout.addWidget(self.view_raw, 0, 0)
+        grid_layout.addWidget(self.view_wrapped, 0, 1)
+        grid_layout.addWidget(self.view_unwrapped, 1, 0)
+        grid_layout.addWidget(self.view_mask, 1, 1)
+        self.addTab(tab_grid, "四分格过程全景")
+
+        # Tab 2: HDR multi-exposure fusion views
+        tab_hdr = QWidget()
+        hdr_layout = QGridLayout(tab_hdr)
+        hdr_layout.setContentsMargins(6, 6, 6, 6)
+        hdr_layout.setSpacing(6)
+
+        self.view_hdr_fused = ScaledImageLabel("HDR 融合高对比度条纹 (Fused Fringe)")
+        self.view_hdr_indices = ScaledImageLabel("各像素最优曝光档位分布 (HDR Index Heatmap)")
+
+        hdr_layout.addWidget(self.view_hdr_fused, 0, 0)
+        hdr_layout.addWidget(self.view_hdr_indices, 0, 1)
+        self.addTab(tab_hdr, "HDR 曝光融合图谱")
 
     def update_views(
         self,
@@ -113,6 +128,9 @@ class MultiImageViewerWidget(QWidget):
         wrapped_phase: Optional[np.ndarray] = None,
         unwrapped_phase: Optional[np.ndarray] = None,
         mask: Optional[np.ndarray] = None,
+        fused_frame: Optional[np.ndarray] = None,
+        exposure_indices: Optional[np.ndarray] = None,
+        num_brackets: int = 1,
     ):
         if raw_frame is not None:
             self.view_raw.set_mat(raw_frame)
@@ -122,4 +140,18 @@ class MultiImageViewerWidget(QWidget):
             self.view_unwrapped.set_mat(unwrapped_phase)
         if mask is not None:
             self.view_mask.set_mat(mask)
+
+        if fused_frame is not None:
+            self.view_hdr_fused.set_mat(fused_frame)
+
+        if exposure_indices is not None and num_brackets > 1:
+            denom = max(1, num_brackets - 1)
+            idx_norm = np.clip(
+                exposure_indices.astype(np.float32) / float(denom) * 255.0, 0, 255
+            ).astype(np.uint8)
+            heatmap = cv2.applyColorMap(idx_norm, cv2.COLORMAP_TURBO)
+            if mask is not None:
+                heatmap[mask == 0] = [20, 20, 25]  # Dark background for masked
+            rgb_heat = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+            self.view_hdr_indices.set_mat(rgb_heat)
 

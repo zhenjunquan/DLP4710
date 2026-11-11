@@ -7,10 +7,25 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+try:
+    from .cuda_phase import (
+        is_cuda_available,
+        cuda_solve_wrapped_phases,
+        cuda_unwrap_wrapped_phases,
+        cuda_compute_mask,
+    )
+except ImportError:
+    def is_cuda_available() -> bool:
+        return False
+    cuda_solve_wrapped_phases = None
+    cuda_unwrap_wrapped_phases = None
+    cuda_compute_mask = None
+
 
 class PhaseProcessor:
     """
     Solves wrapped phase and unwraps 3-frequency 4-step fringe patterns.
+    Supports transparent NVIDIA GPU (CUDA) acceleration with CPU fallback.
     """
 
     def __init__(
@@ -19,11 +34,13 @@ class PhaseProcessor:
         step_num: int = 4,
         blur_kernel_size: Tuple[int, int] = (7, 7),
         blur_sigma: float = 1.57,
+        enable_gpu: bool = True,
     ):
         self.periods = list(periods) if periods is not None else [70.0, 64.0, 59.0]
         self.step_num = step_num
         self.blur_kernel_size = blur_kernel_size
         self.blur_sigma = blur_sigma
+        self.enable_gpu = enable_gpu
 
     def solve_wrapped_phases(
         self,
@@ -45,6 +62,19 @@ class PhaseProcessor:
             raise ValueError(
                 f"Expected {len(self.periods) * self.step_num} frames, got {len(fringe_frames)}."
             )
+
+        if self.enable_gpu and is_cuda_available() and cuda_solve_wrapped_phases is not None:
+            try:
+                return cuda_solve_wrapped_phases(
+                    fringe_frames=fringe_frames,
+                    periods=self.periods,
+                    step_num=self.step_num,
+                    blur_kernel_size=self.blur_kernel_size,
+                    blur_sigma=self.blur_sigma,
+                    roi=roi,
+                )
+            except Exception:
+                pass
 
         h, w = fringe_frames[0].shape[:2]
         if roi is not None:
@@ -108,6 +138,15 @@ class PhaseProcessor:
         if len(frame_paths) != expected:
             raise ValueError(f"Expected {expected} frame paths, got {len(frame_paths)}.")
 
+        if self.enable_gpu and is_cuda_available():
+            frames = []
+            for path in frame_paths:
+                frame = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+                if frame is None:
+                    raise OSError(f"条纹图像无法读取: {path}")
+                frames.append(frame)
+            return self.solve_wrapped_phases(frames, roi=roi)
+
         image_h, image_w = None, None
         rx, ry, rw, rh = 0, 0, 0, 0
 
@@ -166,6 +205,15 @@ class PhaseProcessor:
         if len(wrapped_phases) != 3:
             raise ValueError(f"Expected 3 wrapped phase maps, got {len(wrapped_phases)}.")
 
+        if self.enable_gpu and is_cuda_available() and cuda_unwrap_wrapped_phases is not None:
+            try:
+                return cuda_unwrap_wrapped_phases(
+                    wrapped_phases=wrapped_phases,
+                    periods=self.periods,
+                )
+            except Exception:
+                pass
+
         wrapped = [np.asarray(phase, dtype=np.float64) for phase in wrapped_phases]
         if wrapped[1].shape != wrapped[0].shape or wrapped[2].shape != wrapped[0].shape:
             raise ValueError("Wrapped phase maps must have identical shapes.")
@@ -220,6 +268,11 @@ class PhaseProcessor:
         """
         Computes a binary uint8 mask (0 or 255) based on modulation threshold.
         """
+        if self.enable_gpu and is_cuda_available() and cuda_compute_mask is not None:
+            try:
+                return cuda_compute_mask(modulation, min_modulation=min_modulation)
+            except Exception:
+                pass
         mask = (modulation >= min_modulation).astype(np.uint8) * 255
         return mask
 

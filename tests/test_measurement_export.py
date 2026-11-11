@@ -1,6 +1,7 @@
 """Tests for measurement intermediate-result export."""
 
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -52,6 +53,16 @@ class TestMeasurementExport(unittest.TestCase):
 
             self.assertTrue(ok, message)
             self.assertTrue(os.path.isfile(os.path.join(output, "measurement_info.txt")))
+            self.assertTrue(os.path.isfile(os.path.join(output, "capture_parameters.json")))
+
+            # Check capture_parameters.json content
+            with open(os.path.join(output, "capture_parameters.json"), "r", encoding="utf-8") as f:
+                params = json.load(f)
+            self.assertIn("point_cloud", params)
+            self.assertIn("camera", params)
+            self.assertIn("dlp", params)
+
+            # Check 12 raw fringe images saved in 01_fringes
             for index in range(1, 13):
                 self.assertTrue(
                     os.path.isfile(
@@ -63,52 +74,34 @@ class TestMeasurementExport(unittest.TestCase):
             )
             self.assertTrue(ok, message)
             self.assertEqual(len(frames), 12)
-            for index in range(1, 4):
-                base = os.path.join(
-                    output,
-                    "02_wrapped_phase",
-                    f"wrapped_frequency_{index:02d}",
-                )
-                self.assertTrue(os.path.isfile(base + ".npy"))
-                self.assertTrue(os.path.isfile(base + ".tiff"))
-                self.assertTrue(os.path.isfile(base + "_preview.png"))
 
-            loaded = np.load(
-                os.path.join(output, "03_unwrapped_phase", "unwrapped_phase.npy")
-            )
-            np.testing.assert_array_equal(
-                loaded,
-                self.controller.latest_result["unwrapped_phase"],
-            )
-            saved_mask = cv2.imread(
-                os.path.join(output, "04_auxiliary", "mask.png"),
-                cv2.IMREAD_GRAYSCALE,
-            )
-            np.testing.assert_array_equal(
-                saved_mask,
-                self.controller.latest_result["mask"].astype(np.uint8) * 255,
-            )
+            # Check that slow intermediate phase files are NOT created
+            self.assertFalse(os.path.exists(os.path.join(output, "02_wrapped_phase")))
+            self.assertFalse(os.path.exists(os.path.join(output, "03_unwrapped_phase")))
+            self.assertFalse(os.path.exists(os.path.join(output, "04_auxiliary")))
+
+            # Check point cloud saved in fast binary PLY format
+            ply_path = os.path.join(output, "02_point_cloud", "original_cloud.ply")
+            self.assertTrue(os.path.isfile(ply_path))
+            # Verify no duplicate slow TXT points file created in package
+            txt_path = os.path.join(output, "02_point_cloud", "original_points.txt")
+            self.assertFalse(os.path.exists(txt_path))
+
             expected_point_count = int(
                 np.prod(self.controller.latest_result["xyz_map"].shape[:2])
             )
-            for prefix in ("original", "processed"):
-                ply_path = os.path.join(
-                    output,
-                    "05_point_cloud",
-                    f"{prefix}_cloud.ply",
-                )
-                txt_path = os.path.join(
-                    output,
-                    "05_point_cloud",
-                    f"{prefix}_points.txt",
-                )
-                self.assertTrue(os.path.isfile(ply_path))
-                self.assertTrue(os.path.isfile(txt_path))
-                with open(ply_path, "r", encoding="ascii") as ply_file:
-                    ply_text = ply_file.read()
-                self.assertIn(f"element vertex {expected_point_count}", ply_text)
-                with open(txt_path, "r", encoding="ascii") as txt_file:
-                    self.assertEqual(sum(1 for _ in txt_file), expected_point_count)
+            # Read binary PLY back
+            from dlp_common.reconstruction.point_cloud_io import read_point_cloud_ply, ply_to_txt
+            ok_read, read_pts, _, _ = read_point_cloud_ply(ply_path)
+            self.assertTrue(ok_read)
+            self.assertEqual(len(read_pts), expected_point_count)
+
+            # Test PLY to TXT conversion
+            temp_txt = os.path.join(output, "converted_from_ply.txt")
+            ok_conv, conv_count, _ = ply_to_txt(ply_path, temp_txt)
+            self.assertTrue(ok_conv)
+            self.assertEqual(conv_count, expected_point_count)
+            self.assertTrue(os.path.isfile(temp_txt))
 
     def test_save_contains_different_original_and_processed_clouds(self):
         original_xyz = self.controller.latest_result["xyz_map"]
@@ -123,17 +116,19 @@ class TestMeasurementExport(unittest.TestCase):
             ok, message = self.controller.save_intermediate_results(output)
             self.assertTrue(ok, message)
 
-            original_txt = os.path.join(
-                output, "05_point_cloud", "original_points.txt"
+            from dlp_common.reconstruction.point_cloud_io import read_point_cloud_ply
+            original_ply = os.path.join(
+                output, "02_point_cloud", "original_cloud.ply"
             )
-            processed_txt = os.path.join(
-                output, "05_point_cloud", "processed_points.txt"
+            processed_ply = os.path.join(
+                output, "02_point_cloud", "processed_cloud.ply"
             )
-            with open(original_txt, "r", encoding="ascii") as txt_file:
-                original_count = sum(1 for _ in txt_file)
-            with open(processed_txt, "r", encoding="ascii") as txt_file:
-                processed_count = sum(1 for _ in txt_file)
-            self.assertGreater(original_count, processed_count)
+            self.assertTrue(os.path.isfile(original_ply))
+            self.assertTrue(os.path.isfile(processed_ply))
+
+            _, orig_pts, _, _ = read_point_cloud_ply(original_ply)
+            _, proc_pts, _, _ = read_point_cloud_ply(processed_ply)
+            self.assertGreater(len(orig_pts), len(proc_pts))
 
     def test_existing_result_folder_is_rejected(self):
         with tempfile.TemporaryDirectory() as parent:

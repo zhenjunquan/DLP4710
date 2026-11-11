@@ -30,6 +30,30 @@ def get_cuda_device_name() -> str:
     return ""
 
 
+def get_cuda_info() -> Dict[str, Any]:
+    """Returns diagnostic information about CUDA GPU acceleration."""
+    info: Dict[str, Any] = {
+        "available": False,
+        "device_name": "",
+        "device_count": 0,
+        "total_memory_gb": 0.0,
+        "cuda_version": "",
+    }
+    try:
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            info["available"] = True
+            info["device_name"] = torch.cuda.get_device_name(0)
+            info["device_count"] = torch.cuda.device_count()
+            props = torch.cuda.get_device_properties(0)
+            info["total_memory_gb"] = round(props.total_memory / (1024**3), 2)
+            info["cuda_version"] = str(torch.version.cuda)
+    except Exception:
+        pass
+    return info
+
+
 def reconstruct_points_cuda(
     camera_uv: np.ndarray,
     projector_v: np.ndarray,

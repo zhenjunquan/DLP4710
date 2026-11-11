@@ -433,10 +433,10 @@ class MonoSLReconstructor:
 
         proj_h = float(self.projector_image_size[1])
         ref_cycles = self.reference_cycle_count
-        use_gpu = False
+        use_gpu = bool(self.enable_gpu and is_cuda_available())
 
-        # Keep the scalar path for small inputs and test overrides. Large camera
-        # frames use chunked NumPy reconstruction to avoid millions of Python calls.
+        # Keep scalar path for small inputs and test mocks (<= 10,000 pts).
+        # Real camera frames (step 1 to 8: >380k pts) use high-performance GPU chunked reconstruction.
         if out_rows * out_cols <= 10000:
             for oi, y in enumerate(y_indices):
                 for oj, x in enumerate(x_indices):
@@ -455,8 +455,7 @@ class MonoSLReconstructor:
                 if progress_callback is not None:
                     progress_callback((oi + 1) / max(1, out_rows))
         else:
-            use_gpu = self.enable_gpu and is_cuda_available()
-            chunk_rows = 256 if use_gpu else 64
+            chunk_rows = 512 if use_gpu else 64
             source_x = x_indices if full_size_input else x_indices - rx
             for row_start in range(0, out_rows, chunk_rows):
                 row_end = min(out_rows, row_start + chunk_rows)

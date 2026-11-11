@@ -101,6 +101,70 @@ QPushButton#measureBtn:hover {
     background-color: #0b5ed7;
 }
 
+QPushButton#hdrMeasureBtn {
+    background-color: #6f42c1;
+    border-color: #6f42c1;
+    font-size: 12px;
+    font-weight: bold;
+    min-height: 24px;
+}
+
+QPushButton#hdrMeasureBtn:hover {
+    background-color: #59359a;
+}
+
+QTableWidget {
+    background-color: #1a1a22;
+    gridline-color: #333342;
+    border: 1px solid #363646;
+    border-radius: 4px;
+    color: #e2e2ea;
+    font-size: 11px;
+}
+
+QTableWidget::item {
+    padding: 2px 4px;
+}
+
+QTableWidget::item:selected {
+    background-color: #0d6efd;
+    color: #ffffff;
+}
+
+QHeaderView::section {
+    background-color: #262633;
+    color: #9999aa;
+    padding: 3px 4px;
+    border: 1px solid #333342;
+    font-weight: bold;
+    font-size: 11px;
+}
+
+QSlider::groove:horizontal {
+    border: 1px solid #39394a;
+    height: 6px;
+    background: #202028;
+    border-radius: 3px;
+}
+
+QSlider::sub-page:horizontal {
+    background: #0d6efd;
+    border-radius: 3px;
+}
+
+QSlider::handle:horizontal {
+    background: #58a6ff;
+    border: 1px solid #39394a;
+    width: 14px;
+    margin-top: -5px;
+    margin-bottom: -5px;
+    border-radius: 7px;
+}
+
+QSlider::handle:horizontal:hover {
+    background: #79b8ff;
+}
+
 QPushButton#saveBtn {
     background-color: #198754;
     border-color: #198754;
@@ -249,6 +313,90 @@ QScrollArea#controlScroll {
 
 QScrollArea#controlScroll > QWidget > QWidget {
     background: transparent;
+}
+
+/* --- Modern Tabbed Control Panel & Status Bar --- */
+QTabWidget#controlTabs::pane {
+    border: 1px solid #333345;
+    background-color: #1d1d26;
+    border-radius: 6px;
+    padding: 2px;
+}
+
+QTabWidget#controlTabs > QTabBar::tab {
+    background-color: #242432;
+    color: #9da0b5;
+    padding: 8px 12px;
+    margin-right: 2px;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+QTabWidget#controlTabs > QTabBar::tab:selected {
+    background-color: #323244;
+    color: #ffffff;
+    border-bottom: 2px solid #0d6efd;
+}
+
+QTabWidget#controlTabs > QTabBar::tab:hover:!selected {
+    background-color: #2b2b3b;
+    color: #d8d8e5;
+}
+
+QGroupBox#gpuCard {
+    border: 1px solid #238636;
+    background-color: #132018;
+    border-radius: 6px;
+    margin-top: 11px;
+    padding-top: 12px;
+    color: #39d353;
+}
+
+QGroupBox#gpuCard::title {
+    color: #39d353;
+    background-color: #1a1a20;
+    font-weight: bold;
+}
+
+QCheckBox {
+    color: #e2e2ea;
+    font-size: 12px;
+    spacing: 6px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #4a4a60;
+    border-radius: 3px;
+    background-color: #202028;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #58a6ff;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #0d6efd;
+    border-color: #0d6efd;
+}
+
+QStatusBar {
+    background-color: #14141a;
+    border-top: 1px solid #282836;
+    color: #9e9eb4;
+    min-height: 28px;
+    font-size: 11px;
+}
+
+QLabel#pillGpu, QLabel#pillCamera, QLabel#pillDlp, QLabel#pillCalib {
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: bold;
+    margin: 1px 3px;
 }
 """
 

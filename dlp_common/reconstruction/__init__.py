@@ -5,6 +5,8 @@
 from .point_cloud_io import (
     extract_valid_points,
     keep_largest_image_component,
+    ply_to_txt,
+    read_point_cloud_ply,
     save_point_cloud_ply,
     save_point_cloud_txt,
 )
@@ -14,6 +16,8 @@ __all__ = [
     "MonoSLReconstructor",
     "extract_valid_points",
     "keep_largest_image_component",
+    "ply_to_txt",
+    "read_point_cloud_ply",
     "save_point_cloud_ply",
     "save_point_cloud_txt",
 ]

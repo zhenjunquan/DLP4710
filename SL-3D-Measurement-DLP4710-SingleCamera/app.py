@@ -8,7 +8,7 @@ from .ui.main_window import MeasurementMainWindow
 
 
 def main():
-    app = QApplication(sys.argv)
+    app = QApplication(sys.argv)             
     window = MeasurementMainWindow()
     window.show()
     sys.exit(app.exec())

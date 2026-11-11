@@ -211,7 +211,7 @@ class TestHardware(unittest.TestCase):
             def grab_frame(self, timeout_ms=1500):
                 return True, frames[0]
 
-            def grab_triggered_sequence(self, count, frame_timeout_ms=1000, overall_timeout_ms=15000):
+            def grab_triggered_sequence(self, count, frame_timeout_ms=1000, overall_timeout_ms=15000, *args, **kwargs):
                 return True, frames[:count]
 
         class FakeDlp:
@@ -237,6 +237,108 @@ class TestHardware(unittest.TestCase):
         self.assertEqual(camera.exposure, 12000.0)
         self.assertEqual(camera.gain, 2.5)
         self.assertEqual(camera.trigger_source, "Off")
+
+    def test_dlp_read_and_set_parameters(self):
+        controller = DLP4710Controller(dll_path="")
+        self.assertTrue(controller.is_mock)
+
+        # 1. Read default parameters
+        ok, params, msg = controller.read_all_parameters()
+        self.assertTrue(ok)
+        self.assertIn("led_currents", params)
+        self.assertIn("led_enables", params)
+        self.assertIn("control_method_name", params)
+        self.assertIn("color_mode", params)
+
+        # 2. Set Blue mode
+        ok, msg = controller.set_color_mode("blue", 85.0)
+        self.assertTrue(ok)
+        self.assertEqual(controller.color_mode, "blue")
+        r, g, b = controller.led_currents
+        self.assertEqual(r, 0)
+        self.assertEqual(g, 0)
+        self.assertGreater(b, 500)
+        enables = controller.led_enables
+        self.assertFalse(enables["red"])
+        self.assertFalse(enables["green"])
+        self.assertTrue(enables["blue"])
+
+        # 3. Read back parameters after setting blue
+        ok, currs, _ = controller.read_led_currents()
+        self.assertTrue(ok)
+        self.assertEqual(currs, (0, 0, b))
+
+        ok, ens, _ = controller.read_led_enables()
+        self.assertTrue(ok)
+        self.assertFalse(ens["red"])
+        self.assertTrue(ens["blue"])
+
+        ok, method, _ = controller.read_led_control_method()
+        self.assertTrue(ok)
+        self.assertEqual(method, 0)  # Manual mode (CAIC disabled)
+
+        # 4. Set Green mode
+        ok, msg = controller.set_color_mode("green", 70.0)
+        self.assertTrue(ok)
+        self.assertEqual(controller.color_mode, "green")
+        r, g, b = controller.led_currents
+        self.assertEqual(r, 0)
+        self.assertGreater(g, 500)
+        self.assertEqual(b, 0)
+        self.assertTrue(controller.led_enables["green"])
+
+        # 5. Set Red mode
+        ok, msg = controller.set_color_mode("red", 60.0)
+        self.assertTrue(ok)
+        self.assertEqual(controller.color_mode, "red")
+        r, g, b = controller.led_currents
+        self.assertGreater(r, 400)
+        self.assertEqual(g, 0)
+        self.assertEqual(b, 0)
+        self.assertTrue(controller.led_enables["red"])
+
+        # 6. Set White mode
+        ok, msg = controller.set_color_mode("white", 100.0)
+        self.assertTrue(ok)
+        self.assertEqual(controller.color_mode, "white")
+        self.assertEqual(controller.led_currents, (1000, 1000, 1000))
+        self.assertTrue(all(controller.led_enables.values()))
+
+        # 7. Set Custom mode and arbitrary channel enables
+        ok, _ = controller.set_led_enables(red=True, green=False, blue=True)
+        self.assertTrue(ok)
+        self.assertTrue(controller.led_enables["red"])
+        self.assertFalse(controller.led_enables["green"])
+        self.assertTrue(controller.led_enables["blue"])
+
+        # 8. Set LED control method
+        ok, _ = controller.set_led_control_method(manual=True)
+        self.assertTrue(ok)
+        self.assertEqual(controller.led_control_method, 0)
+
+    def test_pattern_bin_generator(self):
+        import tempfile
+        from dlp_common.hardware.pattern_bin_generator import generate_pattern_bin
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for color, expected_led_byte in [
+                ("blue", 0x04),
+                ("green", 0x02),
+                ("red", 0x01),
+                ("white", 0x07),
+            ]:
+                bin_path = os.path.join(tmp_dir, f"test_patn_{color}.bin")
+                ok, msg = generate_pattern_bin(bin_path, led_color=color)
+                self.assertTrue(ok, f"generate_pattern_bin failed for {color}: {msg}")
+                self.assertTrue(os.path.isfile(bin_path))
+                self.assertEqual(os.path.getsize(bin_path), 26212)
+
+                # Inspect PATN header: byte 26 and byte 50 are the led_code fields
+                with open(bin_path, "rb") as f:
+                    content = f.read()
+                self.assertEqual(content[:4], b"PATN")
+                self.assertEqual(content[26], expected_led_byte)
+                self.assertEqual(content[50], expected_led_byte)
 
 
 if __name__ == "__main__":

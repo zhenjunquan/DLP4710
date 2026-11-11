@@ -442,9 +442,11 @@ class DahengCameraDriver:
         overall_timeout_ms: int = 30000,
         frame_callback: Optional[Callable[[int, np.ndarray], None]] = None,
         retain_frames: bool = True,
+        flush_before: bool = False,
     ) -> Tuple[bool, List[np.ndarray]]:
         """Collect a hardware-triggered sequence while tolerating temporary timeouts."""
-        self.flush_buffer()
+        if flush_before:
+            self.flush_buffer()
         frames: List[np.ndarray] = []
         deadline = time.monotonic() + max(1, overall_timeout_ms) / 1000.0
         empty_timeouts = 0
@@ -461,6 +463,9 @@ class DahengCameraDriver:
             else:
                 empty_timeouts += 1
                 if received_count == 0 and empty_timeouts >= 5:
+                    break
+                if received_count > 0 and empty_timeouts >= 3:
+                    # Burst sequence has definitely finished; break early to allow retry rather than hanging
                     break
         return received_count == count, frames
 
