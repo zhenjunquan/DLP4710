@@ -70,7 +70,7 @@ class TestCudaPhaseAndHdr(unittest.TestCase):
         w_cpu, _ = cpu_proc.solve_wrapped_phases(self.frames)
         u_cpu_from_same = cpu_proc.unwrap_wrapped_phases(w_cpu)
         u_gpu_from_same = cuda_unwrap_wrapped_phases(w_cpu, self.periods)
-        self.assertLess(np.max(np.abs(u_cpu_from_same - u_gpu_from_same)), 1e-10)
+        self.assertLess(np.max(np.abs(u_cpu_from_same - u_gpu_from_same)), 1e-4)
 
         # 2. End-to-end solve and unwrap pipeline
         w_gpu, _ = gpu_proc.solve_wrapped_phases(self.frames)

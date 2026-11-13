@@ -204,3 +204,4 @@ uv pip install --python "D:\ZhenSoft\Miniconda\envs\dlp\python.exe" numpy scipy 
    - 点击 **“导出标准 PLY 点云”**：生成带空间坐标的 `.ply` 文件，兼容 MeshLab、CloudCompare、SolidWorks 等主流软件；
    - 点击 **“导出 TXT (X Y Z) 坐标”**：生成制表符分隔三维文本数据，便于在 MATLAB 或 Python 中直接进行几何测量与点云分析。
 
+DLP资料：OPR407180S https://www.bopixel.com/product-dlp-succession/204.html

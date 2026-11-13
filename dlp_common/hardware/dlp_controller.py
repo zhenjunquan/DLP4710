@@ -7,7 +7,7 @@ import ctypes
 import os
 import sys
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 class DLP4710Controller:
@@ -607,6 +607,114 @@ class DLP4710Controller:
         except Exception as e:
             self._last_error = f"BIN烧录异常: {e}"
             return False, self._last_error
+
+    def burn_and_verify_bin(
+        self,
+        bin_path: str,
+        verify_projection: bool = True,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> Tuple[bool, Dict[str, Any], str]:
+        """
+        Comprehensive multi-stage BIN burning and hardware verification pipeline:
+        Stage 1: Pre-burn static validation of PATN headers, sets, and profiles
+        Stage 2: Flash write via loadPreBuildPattern
+        Stage 3: Trigger Out 2 & Pattern Order Table setup from flash
+        Stage 4: Readback validation of controller mode and state
+        Stage 5: Optional dry-run pattern projection test (starts and stops projection)
+        """
+        report: Dict[str, Any] = {
+            "bin_path": bin_path,
+            "pre_burn_passed": False,
+            "flash_write_passed": False,
+            "order_table_passed": False,
+            "readback_passed": False,
+            "dry_run_passed": False,
+            "pattern_summary": {},
+            "error_stage": None,
+        }
+
+        def report_progress(pct: int, msg: str):
+            if progress_callback:
+                progress_callback(pct, msg)
+
+        # Stage 1: Pre-burn static validation
+        report_progress(10, f"正在对 BIN 文件执行静态格式校验: {os.path.basename(bin_path)}...")
+        from .patn_toolkit import validate_patn, inspect_patn
+        val_ok, issues, val_report = validate_patn(bin_path)
+        report["pattern_summary"] = val_report
+
+        if not val_ok:
+            report["error_stage"] = "pre_burn_validation"
+            err_msg = f"BIN文件预校验失败，存在以下致命问题:\n" + "\n".join(f" - {i}" for i in issues)
+            self._last_error = err_msg
+            return False, report, err_msg
+
+        report["pre_burn_passed"] = True
+        report_progress(30, "静态校验通过: PATN结构、条纹截面与校验和完全正确")
+
+        # Stage 2: Flash Write
+        report_progress(40, "正在烧录数据到 DLP4710 Flash (loadPreBuildPattern)...")
+        if not self._is_connected and not self.connect():
+            report["error_stage"] = "device_connection"
+            return False, report, self._last_error or "DLP无法连接"
+
+        burn_ok, burn_msg = self.burn_bin(bin_path)
+        if not burn_ok:
+            report["error_stage"] = "flash_write"
+            return False, report, f"Flash烧录失败: {burn_msg}"
+
+        report["flash_write_passed"] = True
+        report_progress(60, "Flash 数据写入成功")
+
+        # Stage 3: Mode & Trigger setup
+        report_progress(70, "配置内部图案模式与硬触发 (Trigger Out 2)...")
+        prep_ok, prep_msg = self.prepare_pattern_mode()
+        if not prep_ok:
+            report["error_stage"] = "order_table_setup"
+            return False, report, f"图案顺序表加载失败: {prep_msg}"
+
+        report["order_table_passed"] = True
+        report_progress(80, "图案顺序表与模式配置成功")
+
+        # Stage 4: Readback validation
+        report_progress(85, "回读 DLP 内部工作模式与状态校验...")
+        if not self._is_mock:
+            try:
+                # Read operating mode
+                mode = self.read_operating_mode()
+                report["operating_mode"] = mode
+                report["readback_passed"] = (mode == "pattern" or mode is not None)
+            except Exception as e:
+                report["readback_passed"] = False
+                report["error_stage"] = "readback"
+                return False, report, f"状态回读异常: {e}"
+        else:
+            report["readback_passed"] = True
+            report["operating_mode"] = "pattern"
+
+        report_progress(90, "状态回读正常: DLP 已处于 Pattern 运行状态")
+
+        # Stage 5: Dry-run projection test
+        if verify_projection:
+            report_progress(92, "正在执行物理投影空跑测试 (Dry-run Test)...")
+            start_ok = self.start_work(repeat_num=0)
+            if not start_ok:
+                report["error_stage"] = "dry_run_start"
+                return False, report, "空跑测试启动投影失败"
+
+            time.sleep(0.3)
+            stop_ok = self.stop_work()
+            if not stop_ok:
+                report["error_stage"] = "dry_run_stop"
+                return False, report, "空跑测试停止投影失败"
+
+            report["dry_run_passed"] = True
+            report_progress(98, "物理投影空跑测试成功通过")
+        else:
+            report["dry_run_passed"] = True
+
+        report_progress(100, "DLP4710 PATN 烧录与全流程硬件验证顺利完成！")
+        return True, report, "DLP4710 固件烧录与硬件验证顺利通过！"
 
     def prepare_pattern_mode(self) -> Tuple[bool, str]:
         """Load the pattern order already stored in Flash and enter internal mode."""

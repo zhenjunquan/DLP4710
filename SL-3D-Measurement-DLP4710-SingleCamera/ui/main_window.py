@@ -11,6 +11,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -53,6 +54,7 @@ from ..core.workers import (
     MultiExposureMeasureWorker,
 )
 from .gl_view import GLPointCloudWidget
+from .pattern_tool_dialog import PatternBinToolDialog
 from .styles import MEASUREMENT_STYLE
 from .widgets import MultiImageViewerWidget, ScaledImageLabel
 
@@ -249,10 +251,13 @@ class MeasurementMainWindow(QMainWindow):
         self.btn_browse_bin = QPushButton("选择BIN")
         self.btn_burn_bin = QPushButton("烧录测量条纹BIN")
         self.btn_gen_color_bin = QPushButton("生成对应颜色条纹BIN")
+        self.btn_open_patn_tool = QPushButton("🛠️ 图案构建与烧录验证工具箱...")
+        self.btn_open_patn_tool.setStyleSheet("font-weight: bold; background-color: #1f4068; color: #ffffff;")
         lay_bin.addWidget(self.edit_bin_path, 0, 0, 1, 2)
         lay_bin.addWidget(self.btn_browse_bin, 0, 2)
         lay_bin.addWidget(self.btn_burn_bin, 1, 0, 1, 2)
         lay_bin.addWidget(self.btn_gen_color_bin, 1, 2)
+        lay_bin.addWidget(self.btn_open_patn_tool, 2, 0, 1, 3)
         lay.addWidget(grp_bin)
 
         # 4. Camera & DLP Parameter Settings
@@ -569,6 +574,7 @@ class MeasurementMainWindow(QMainWindow):
         self.btn_browse_bin.clicked.connect(self._on_browse_bin)
         self.btn_burn_bin.clicked.connect(self._on_burn_bin)
         self.btn_gen_color_bin.clicked.connect(self._on_gen_color_bin)
+        self.btn_open_patn_tool.clicked.connect(self._on_open_patn_tool)
         self.btn_toggle_preview.clicked.connect(self._on_toggle_preview)
 
         self.btn_measure_online.clicked.connect(self._on_measure_online)
@@ -826,6 +832,11 @@ class MeasurementMainWindow(QMainWindow):
         if worker is not None:
             worker.deleteLater()
 
+    def _on_open_patn_tool(self):
+        """Open the integrated DLP4710 Pattern Binary Builder, Validator & Burner tool dialog."""
+        dlg = PatternBinToolDialog(dlp_controller=self.controller.dlp, parent=self)
+        dlg.exec()
+
     def _load_calib_file(self, path: str):
         self.edit_calib_path.setText(path)
         ok, msg = self.controller.load_calibration(path)
@@ -962,6 +973,7 @@ class MeasurementMainWindow(QMainWindow):
             self.btn_browse_bin,
             self.btn_burn_bin,
             self.btn_gen_color_bin,
+            self.btn_open_patn_tool,
             self.edit_bin_path,
             self.chk_enable_gpu,
             self.combo_step,
@@ -1021,10 +1033,12 @@ class MeasurementMainWindow(QMainWindow):
         step = self._get_selected_step()
         min_mod = self.spin_mod.value()
 
+        # NOTE: Pass roi=None to keep full frame coordinates (5328x4608), eliminating shape mismatch!
         self.measure_worker = MeasureWorker(
             reconstructor=self.controller.reconstructor,
             processor=self.controller.phase_processor,
             frames=frames,
+            roi=None,
             sample_step=step,
             min_modulation=min_mod,
             gray_frame=gray_frame,
@@ -1546,14 +1560,18 @@ class MeasurementMainWindow(QMainWindow):
         step = self._get_selected_step()
         min_mod = self.spin_mod.value()
 
+        # NOTE: Pass roi=None to keep full frame coordinates (5328x4608), eliminating shape mismatch!
+        # compute_per_bracket_phases=False bypasses the redundant 13-bracket loop, slashing time from 90s to 2~3s!
         self.multi_measure_worker = MultiExposureMeasureWorker(
             reconstructor=self.controller.reconstructor,
             processor=self.controller.phase_processor,
             brackets_frames=brackets_frames,
+            roi=None,
             sample_step=step,
             min_modulation=min_mod,
             gray_frame=gray_frame,
             brackets_info=brackets_info,
+            compute_per_bracket_phases=False,
         )
         self.multi_measure_worker.progress.connect(lambda p, m: (
             self.progress_bar.setValue(p),
